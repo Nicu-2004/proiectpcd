@@ -1,26 +1,4 @@
-/**
- * Miclau Nicolae
- * IR3 2026, subgrupa 7
- * Grading App - Server (schelet)
- *
- * Responsabilitate Membru 3:
- *   - Scheletul aplicatiei (main)
- *   - Logica fork()/wait() pentru procesarea fiecarei intrebari
- *     in procese separate
- *
- * Compilare: gcc -Wall -Wextra server_grading.c -o server_grading
- * Rulare:    ./server_grading
- *
- * Exemplu output:
- *   [Server] Pornit pe portul 9090. Astept clienti...
- *   [Server] Client conectat: 127.0.0.1
- *   [Server] Primit imagine: test_student.png
- *   [Server] Procesez intrebarea 1 in procesul PID=12345
- *   [Server] Procesez intrebarea 2 in procesul PID=12346
- *   [Server] Procesez intrebarea 3 in procesul PID=12347
- *   [Server] Toate intrebarile procesate. Trimit rezultatul...
- *   [Server] Gata.
- */
+
 
 #include <stdio.h>      //folosit pentru printf, perror
 #include <stdlib.h>     //folosit pentru exit
