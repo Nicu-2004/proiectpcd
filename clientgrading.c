@@ -1,28 +1,4 @@
-/**
- * Miclau Nicolae
- * IR3 2026, subgrupa 7
- * Grading App - Client (schelet)
- *
- * Compilare: gcc -Wall -Wextra client_grading.c -o client_grading
- * Rulare:    ./client_grading
- *
- * Exemplu sesiune:
- *   [GradingApp] Conectat la server 127.0.0.1:9090
- *
- *   === MENIU ===
- *   1. Corecteaza test (introduce calea imaginii)
- *   2. Iesire
- *   Selectie: 1
- *   Calea imaginii: /home/student/test.png
- *
- *   [Server] Nota: 07.0 / 10
- *
- *   === MENIU ===
- *   1. Corecteaza test (introduce calea imaginii)
- *   2. Iesire
- *   Selectie: 2
- *   [Client] Conexiune inchisa.
- */
+
 
 #include <stdio.h>      //folosit pentru printf, perror, fgets, fflush
 #include <stdlib.h>     //folosit pentru exit
