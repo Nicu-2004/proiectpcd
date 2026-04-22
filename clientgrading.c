@@ -1,20 +1,16 @@
 #include <stdio.h>      /* printf, perror, fgets, fflush */
 #include <stdlib.h>     /* exit */
-#include <string.h>     /* strcmp, strlen, strcspn, memset */
+#include <string.h>     /* strcmp, strlen, strcspn */
 #include <unistd.h>     /* close */
-#include <sys/types.h>  /* tipuri socket */
 #include <sys/socket.h> /* socket, connect, send, recv */
 #include <netinet/in.h> /* struct sockaddr_in, htons */
 #include <arpa/inet.h>  /* inet_addr */
 
-/* Folosim enum pentru a evita erorile de tip 'magic number' si 'macro-to-enum' */
 enum Configurare {
     PORT_SERVER = 9090,
     DIM_BUFFER  = 4096,
     DIM_SELECTIE = 16
 };
-
-/* ── afiseaza_meniu ────────────────────────────────────────────────────────── */
 
 void afiseaza_meniu(void) {
     (void)printf("\n=== MENIU ===\n");
@@ -24,12 +20,11 @@ void afiseaza_meniu(void) {
     (void)fflush(stdout); 
 }
 
-/* ── trimite_imagine ────────────────────────────────────────────────────────── */
-
 void proceseaza_optiunea_unu(int socket_comunicare) {
-    char cale_imagine[DIM_BUFFER];
-    char mesaj_server[DIM_BUFFER];
-    char raspuns_server[DIM_BUFFER];
+    /* Initializarea cu {0} inlocuieste memset si este safe pentru linter */
+    char cale_imagine[DIM_BUFFER] = {0};
+    char mesaj_server[DIM_BUFFER] = {0};
+    char raspuns_server[DIM_BUFFER] = {0};
 
     (void)printf("Calea imaginii: ");
     (void)fflush(stdout);
@@ -42,15 +37,28 @@ void proceseaza_optiunea_unu(int socket_comunicare) {
             return;
         }
 
-        /* Construim mesajul folosind snprintf (mai sigur si trece de clang-tidy) */
-        (void)snprintf(mesaj_server, DIM_BUFFER, "grade:%s", cale_imagine); 
+/* Construim mesajul manual, caracter cu caracter */
+        size_t index_mesaj = 0;
+        const char *prefix_comanda = "grade:";
 
+        /* Copiem prefixul */
+        while (prefix_comanda[index_mesaj] != '\0' && index_mesaj < (size_t)DIM_BUFFER - 1) {
+            mesaj_server[index_mesaj] = prefix_comanda[index_mesaj];
+            index_mesaj++;
+        }
+
+        /* Copiem calea imaginii */
+        size_t index_cale = 0;
+        while (cale_imagine[index_cale] != '\0' && index_mesaj < (size_t)DIM_BUFFER - 1) {
+            mesaj_server[index_mesaj] = cale_imagine[index_cale];
+            index_mesaj++;
+            index_cale++;
+        }
+        mesaj_server[index_mesaj] = '\0';
+        
         (void)printf("[Client] Trimit catre server: '%s'\n", mesaj_server);
         (void)send(socket_comunicare, mesaj_server, strlen(mesaj_server), 0);
-
-        (void)memset(raspuns_server, 0, DIM_BUFFER); 
         
-        /* Folosim ssize_t pentru a evita narrowing conversion */
         ssize_t octeti_primiti = recv(socket_comunicare, raspuns_server, (size_t)DIM_BUFFER - 1, 0);
         
         if (octeti_primiti <= 0) {
@@ -61,8 +69,6 @@ void proceseaza_optiunea_unu(int socket_comunicare) {
     }
 }
 
-/* ── Main ────────────────────────────────────────────────────────────────────── */
-
 int main(void) {
     int descriptor_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (descriptor_socket < 0) {
@@ -70,8 +76,8 @@ int main(void) {
         return 1;
     }
 
-    struct sockaddr_in adresa_server;
-    (void)memset(&adresa_server, 0, sizeof(adresa_server)); 
+    /* Initializare directa fara memset */
+    struct sockaddr_in adresa_server = {0};
     
     adresa_server.sin_family = AF_INET;
     adresa_server.sin_port = htons(PORT_SERVER);
@@ -85,7 +91,7 @@ int main(void) {
 
     (void)printf("[GradingApp] Conectat la server pe portul %d\n", PORT_SERVER);
 
-    char buffer_selectie[DIM_SELECTIE];
+    char buffer_selectie[DIM_SELECTIE] = {0};
 
     while (1) {
         afiseaza_meniu();
