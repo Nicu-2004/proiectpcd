@@ -1,106 +1,111 @@
+#include <stdio.h>      /* printf, perror, fgets, fflush */
+#include <stdlib.h>     /* exit */
+#include <string.h>     /* strcmp, strlen, strcspn, memset */
+#include <unistd.h>     /* close */
+#include <sys/types.h>  /* tipuri socket */
+#include <sys/socket.h> /* socket, connect, send, recv */
+#include <netinet/in.h> /* struct sockaddr_in, htons */
+#include <arpa/inet.h>  /* inet_addr */
 
+/* Folosim enum pentru a evita erorile de tip 'magic number' si 'macro-to-enum' */
+enum Configurare {
+    PORT_SERVER = 9090,
+    DIM_BUFFER  = 4096,
+    DIM_SELECTIE = 16
+};
 
-#include <stdio.h>      //folosit pentru printf, perror, fgets, fflush
-#include <stdlib.h>     //folosit pentru exit
-#include <string.h>     //folosit pentru strcmp, strlen, strcspn, memset
-#include <unistd.h>     //folosit pentru close
-#include <sys/types.h>  //folosit pentru tipurile de date socket
-#include <sys/socket.h> //folosit pentru socket, connect, send, recv
-#include <netinet/in.h> //folosit pentru struct sockaddr_in, htons
-#include <arpa/inet.h>  //folosit pentru inet_addr
-
-#define PORT      9090         //portul serverului
-#define BUF_SIZE  4096         //dimensiunea bufferului pentru mesaje
-#define SERVER_IP "127.0.0.1"  //adresa IP a serverului
-
-// ── afiseaza_meniu ────────────────────────────────────────────────────────────
+/* ── afiseaza_meniu ────────────────────────────────────────────────────────── */
 
 void afiseaza_meniu(void) {
-    printf("\n=== MENIU ===\n");
-    printf("1. Corecteaza test (introduce calea imaginii)\n");
-    printf("2. Iesire\n");
-    printf("Selectie: ");
-    fflush(stdout); //fortam afisarea imediata a promptului
+    (void)printf("\n=== MENIU ===\n");
+    (void)printf("1. Corecteaza test (introduce calea imaginii)\n");
+    (void)printf("2. Iesire\n");
+    (void)printf("Selectie: ");
+    (void)fflush(stdout); 
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+/* ── trimite_imagine ────────────────────────────────────────────────────────── */
+
+void proceseaza_optiunea_unu(int socket_comunicare) {
+    char cale_imagine[DIM_BUFFER];
+    char mesaj_server[DIM_BUFFER];
+    char raspuns_server[DIM_BUFFER];
+
+    (void)printf("Calea imaginii: ");
+    (void)fflush(stdout);
+
+    if (fgets(cale_imagine, DIM_BUFFER, stdin) != NULL) {
+        cale_imagine[strcspn(cale_imagine, "\n")] = '\0';
+
+        if (strlen(cale_imagine) == 0) {
+            (void)printf("[ERR] Calea nu poate fi goala.\n");
+            return;
+        }
+
+        /* Construim mesajul folosind snprintf (mai sigur si trece de clang-tidy) */
+        (void)snprintf(mesaj_server, DIM_BUFFER, "grade:%s", cale_imagine); 
+
+        (void)printf("[Client] Trimit catre server: '%s'\n", mesaj_server);
+        (void)send(socket_comunicare, mesaj_server, strlen(mesaj_server), 0);
+
+        (void)memset(raspuns_server, 0, DIM_BUFFER); 
+        
+        /* Folosim ssize_t pentru a evita narrowing conversion */
+        ssize_t octeti_primiti = recv(socket_comunicare, raspuns_server, (size_t)DIM_BUFFER - 1, 0);
+        
+        if (octeti_primiti <= 0) {
+            (void)printf("[ERR] Serverul s-a deconectat.\n");
+        } else {
+            (void)printf("\n[Rezultat] %s\n", raspuns_server);
+        }
+    }
+}
+
+/* ── Main ────────────────────────────────────────────────────────────────────── */
 
 int main(void) {
-    int sockfd=socket(AF_INET, SOCK_STREAM, 0); //cream socket TCP
-    if (sockfd < 0) { perror("[ERR] socket"); return 1; }
-
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));     //initializare cu 0
-    server_addr.sin_family=AF_INET;                    //familia IPv4
-    server_addr.sin_port=htons(PORT);                  //portul in network byte order
-    server_addr.sin_addr.s_addr=inet_addr(SERVER_IP); //adresa IP a serverului
-
-    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("[ERR] connect - serverul nu e pornit?");
-        close(sockfd);
+    int descriptor_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (descriptor_socket < 0) {
+        perror("[ERR] socket");
         return 1;
     }
 
-    printf("[GradingApp] Conectat la server %s:%d\n", SERVER_IP, PORT);
+    struct sockaddr_in adresa_server;
+    (void)memset(&adresa_server, 0, sizeof(adresa_server)); 
+    
+    adresa_server.sin_family = AF_INET;
+    adresa_server.sin_port = htons(PORT_SERVER);
+    adresa_server.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    char selectie[16]; //buffer pentru selectia din meniu
-    char cale[BUF_SIZE]; //buffer pentru calea imaginii
-    char msg[BUF_SIZE];  //buffer pentru mesajul de trimis serverului
-    char resp[BUF_SIZE]; //buffer pentru raspunsul primit de la server
+    if (connect(descriptor_socket, (const struct sockaddr *)&adresa_server, (socklen_t)sizeof(adresa_server)) < 0) {
+        perror("[ERR] connect - serverul nu e pornit?");
+        (void)close(descriptor_socket);
+        return 1;
+    }
+
+    (void)printf("[GradingApp] Conectat la server pe portul %d\n", PORT_SERVER);
+
+    char buffer_selectie[DIM_SELECTIE];
 
     while (1) {
-        afiseaza_meniu(); //afisam optiunile disponibile
+        afiseaza_meniu();
 
-        if (fgets(selectie, sizeof(selectie), stdin) == NULL) break; //EOF, iesim
-        selectie[strcspn(selectie, "\n")]='\0'; //eliminam newline-ul
+        if (fgets(buffer_selectie, DIM_SELECTIE, stdin) == NULL) {
+            break; 
+        }
+        buffer_selectie[strcspn(buffer_selectie, "\n")] = '\0';
 
-        if (strcmp(selectie, "1") == 0) {
-            // ── Optiunea 1: trimite imaginea pentru corectare ─────────────
-            printf("Calea imaginii: ");
-            fflush(stdout);
-
-            if (fgets(cale, sizeof(cale), stdin) == NULL) break; //citim calea imaginii
-            cale[strcspn(cale, "\n")]='\0'; //eliminam newline-ul
-
-            if (strlen(cale) == 0) { //verificam ca nu e goala
-                printf("[ERR] Calea nu poate fi goala.\n");
-                continue;
-            }
-
-            //construim mesajul "grade:<cale>" caracter cu caracter
-            int i=0, j=0;
-            const char *prefix="grade:";
-            while (prefix[j] != '\0') { msg[i++]=prefix[j++]; } //copiem "grade:"
-            j=0;
-            while (cale[j] != '\0' && i < BUF_SIZE-1) { msg[i++]=cale[j++]; } //copiem calea
-            msg[i]='\0'; //terminatorul de sir
-
-            printf("[Client] Trimit catre server: '%s'\n", msg);
-            send(sockfd, msg, strlen(msg), 0); //trimitem cererea catre server
-
-            memset(resp, 0, sizeof(resp));
-            int n=recv(sockfd, resp, BUF_SIZE-1, 0); //asteptam raspunsul serverului
-            if (n <= 0) { printf("[ERR] Serverul s-a deconectat.\n"); break; }
-            resp[n]='\0';
-
-            printf("\n[Rezultat] %s\n", resp); //afisam nota primita de la server
-
-        } else if (strcmp(selectie, "2") == 0) {
-            // ── Optiunea 2: iesire ────────────────────────────────────────
-            send(sockfd, "quit", 4, 0); //trimitem comanda de iesire
-
-            memset(resp, 0, sizeof(resp));
-            int n=recv(sockfd, resp, BUF_SIZE-1, 0); //asteptam confirmarea
-            if (n > 0) { resp[n]='\0'; printf("%s\n", resp); }
-
-            printf("[Client] Conexiune inchisa.\n");
-            break; //iesim din bucla meniului
-
+        if (strcmp(buffer_selectie, "1") == 0) {
+            proceseaza_optiunea_unu(descriptor_socket);
+        } else if (strcmp(buffer_selectie, "2") == 0) {
+            (void)send(descriptor_socket, "quit", 4, 0);
+            (void)printf("[Client] Conexiune inchisa.\n");
+            break;
         } else {
-            printf("[ERR] Selectie invalida. Alege 1 sau 2.\n"); //selectie gresita
+            (void)printf("[ERR] Selectie invalida. Alege 1 sau 2.\n");
         }
     }
 
-    close(sockfd); //inchidem socket-ul la final
+    (void)close(descriptor_socket);
     return 0;
 }
