@@ -128,25 +128,21 @@ Pentru fiecare coloana se cauta contururi. Se filtreaza doar contururile care au
 7. Compilare si Rulare
    Deoarece proiectul combina cod C si C++, procesul de compilare pentru server se realizeaza in mai multe etape. Fisierele sursa sunt intai transformate in fisiere obiect (.o), dupa care sunt legate intr-un singur executabil, adaugand referintele catre bibliotecile externe.
 
-Compilarea Serverului
-Pasul 1: Compilarea modulului principal de retea intr-un fisier obiect, fara a face legatura finala.
+Dependente
+
+sudo apt-get update
+
+sudo apt-get install -y gcc g++ libopencv-dev pkg-config
+
+Compilare
+
 gcc -c servergrading.c -o servergrading.o
 
-Pasul 2: Compilarea puntii OpenCV (C++) intr-un fisier obiect. Aici se utilizeaza pkg-config pentru a prelua automat caile catre headerele instalate pentru OpenCV varianta 4.
+g++ -c opencv_punte.cpp -o opencv_punte.o $(pkg-config --cflags opencv4)
 
-g++ -c opencv_punte.cpp -o opencv_punte.o `pkg-config --cflags opencv4`
+g++ servergrading.o opencv_punte.o -o server_grading $(pkg-config --libs opencv4)
 
-Pasul 3: Legarea (Linking) fisierelor obiect pentru a obtine executabilul final numit "server". Se foloseste compilatorul g++ pentru a asigura legaturile corecte la biblioteca standard C++, se ataseaza bibliotecile dinamice OpenCV si se adauga flag-ul -lconfig pentru parsarea fisierelor de configurare (.cfg).
-
-g++ servergrading.o opencv_punte.o -o server `pkg-config --libs opencv4` -lconfig
-
-Compilarea Clientului
-Spre deosebire de server, clientul este un program C de sine statator care nu necesita OpenCV sau alte biblioteci complexe (in afara de cele standard de retea POSIX), asadar compilarea se face printr-o singura comanda:
-
-gcc clientgrading.c -o client
-
-Instructiuni de Executie
-Pentru a testa si utiliza sistemul, este necesar sa deschideti doua ferestre de terminal in folderul in care ati compilat fisierele.
+gcc clientgrading.c -o client_grading
 
 Pornirea procesului principal (Terminal 1):
 
