@@ -19,6 +19,7 @@ struct IntervalIntrebari {
     size_t final;
 };
 
+// Configuratia pentru optica aplicatiei
 enum ConfigOMR : std::uint8_t {
     max_intrebari = 40,
     intrebari_coloana = 20,
@@ -34,16 +35,18 @@ const float aspect_min = 0.7F;
 const float aspect_max = 1.3F;
 const float scala_lungime = 1200.0F;
 
-std::array<int, max_intrebari> raspunsuri_student;
-std::array<int, max_intrebari> barem_corect;
+namespace { //namespace pentru a fi anonim 
 
-int numar_coloana_curenta = 1;
+// Variabile globale folosite
+std::array<int, max_intrebari> raspunsuri_student; //raspunsurile detectate din imagine
+std::array<int, max_intrebari> barem_corect;       //raspunsurile corecte din barem.txt
+int numar_coloana_curenta = 1;                     //coloana curenta procesata (1=stanga, 2=dreapta)
 
+// Citim baremul de raspunsuri corecte din fisierul dat
 void incarca_barem_din_fisier(const char* nume_fisier) {
     ifstream fisier(nume_fisier);
 
     if (!fisier.is_open()) {
-        // REPARAT: Am scos endl (Eroarea 1 din cele 7)
         cout << "[Eroare] Nu am gasit fisierul " << nume_fisier << "\n";
         for (int &raspuns : barem_corect) {
             raspuns = 0;
@@ -53,18 +56,20 @@ void incarca_barem_din_fisier(const char* nume_fisier) {
 
     string linie;
     size_t index_intrebare = 0;
-
+    
+    // Conversia literelor in numere echivalente pentru verificare
     while (getline(fisier, linie) && index_intrebare < max_intrebari) {
-        if (linie.find('A') != string::npos) { barem_corect.at(index_intrebare) = 0; }
+        if (linie.find('A') != string::npos)      { barem_corect.at(index_intrebare) = 0; }
         else if (linie.find('B') != string::npos) { barem_corect.at(index_intrebare) = 1; }
         else if (linie.find('C') != string::npos) { barem_corect.at(index_intrebare) = 2; }
         else if (linie.find('D') != string::npos) { barem_corect.at(index_intrebare) = 3; }
-        else { barem_corect.at(index_intrebare) = -1; }
+        else                                       { barem_corect.at(index_intrebare) = -1; }
         index_intrebare++;
     }
     fisier.close();
 }
 
+// comparatori pentru sortare rectangles: sus-jos si stanga-dreapta
 auto sorteaza_sus_jos(const Rect &rect_a, const Rect &rect_b) -> bool { 
     return rect_a.y < rect_b.y; 
 }
@@ -73,10 +78,12 @@ auto sorteaza_stanga_dreapta(const Rect &rect_a, const Rect &rect_b) -> bool {
     return rect_a.x < rect_b.x; 
 }
 
+// Proceseaza o coloana de bule din imaginea threshold si detecteaza raspunsurile
 void proceseaza_coloana(const Mat &imagine_thresh, const IntervalIntrebari interval) {
     vector<vector<Point>> contururi;
     findContours(imagine_thresh, contururi, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
 
+    // Creerea contur pentru a verifica doar bulele si nimic altceva
     vector<Rect> bule;
     for (const auto &contur : contururi) {
         const Rect cutie = boundingRect(contur);
@@ -100,19 +107,20 @@ void proceseaza_coloana(const Mat &imagine_thresh, const IntervalIntrebari inter
     const string nume_poza = (numar_coloana_curenta == 1) ? "debug_stanga.jpg" : "debug_dreapta.jpg";
     imwrite(nume_poza, poza_debug);
     numar_coloana_curenta++;
-
+  
     sort(bule.begin(), bule.end(), sorteaza_sus_jos);
 
     auto q_index = interval.start;
     for (size_t contor = 0; contor + 3 < bule.size() && q_index <= interval.final; contor += 4) {
-        // REPARAT: static_cast (Erorile de tip narrowing)
         vector<Rect> rand_curent(bule.begin() + static_cast<long>(contor), 
-                                     bule.begin() + static_cast<long>(contor) + 4);
+                                 bule.begin() + static_cast<long>(contor) + 4);
+        // Sortare stanga dreapta + sus jos pentru a le lua in ordine corecta
         sort(rand_curent.begin(), rand_curent.end(), sorteaza_stanga_dreapta);
 
         int pixeli_maximi = 0;
         int raspuns_ales = -1;
-
+        
+        // Parcurgerea pixelilor de pe fiecare intrebare pentru a determina care a fost selectat
         for (int j_pos = 0; j_pos < 4; j_pos++) {
             const Mat interior_bula = imagine_thresh(rand_curent.at(static_cast<size_t>(j_pos)));
             const int pixeli_albi = countNonZero(interior_bula);
@@ -127,47 +135,59 @@ void proceseaza_coloana(const Mat &imagine_thresh, const IntervalIntrebari inter
     }
 }
 
-extern "C" {
-    auto incarca_imagine_opencv(const char* cale) -> int {
-        incarca_barem_din_fisier("barem.txt");
-        numar_coloana_curenta = 1;
+}
 
+// Functii expuse catre C (servergrading.c)
+// Acestea NU intra in namespace anonim deoarece trebuie sa fie vizibile din C.
+// Exista pentru a nu se modifica numele functilor pentru a putea fi cautat de fisierele C
+extern "C" {
+
+    // incarca imaginea, ruleaza procesarea OMR si populeaza raspunsuri_student[]
+    auto incarca_imagine_opencv(const char* cale) -> int {
+        incarca_barem_din_fisier("barem.txt"); //citim baremul la fiecare imagine noua
+        numar_coloana_curenta = 1;             //resetam contorul de coloane
+
+        // Incarcarea pozei in memorie
         const Mat imagine = imread(cale, IMREAD_COLOR);
         if (imagine.empty()) {
-            return 0;
+            return 0; //imaginea nu a putut fi citita
         }
 
         const auto scala = scala_lungime / static_cast<float>(imagine.rows);
         Mat imagine_redimensionata;
+        // Resize pentru a functiona pentru a functiona pentru setarile noastre
         resize(imagine, imagine_redimensionata, Size(), scala, scala);
 
-        Mat gri; 
-        Mat blur; 
-        Mat thresh;
+        Mat gri;   //imaginea convertita in tonuri de gri
+        Mat blur;  //imaginea dupa aplicarea filtrului gaussian
+        Mat thresh; //imaginea binarizata (alb/negru)
         cvtColor(imagine_redimensionata, gri, COLOR_BGR2GRAY);
         GaussianBlur(gri, blur, Size(gaussian_k, gaussian_k), 0);
         adaptiveThreshold(blur, thresh, threshold_pixeli, ADAPTIVE_THRESH_GAUSSIAN_C, 
                           THRESH_BINARY_INV, adaptive_block, adaptive_c);
 
         const int jumatate_x = thresh.cols / 2;
-        const Mat stanga = thresh(Rect(0, 0, jumatate_x, thresh.rows));
+        // Impartire pagina in doua pentru a putea fi procesat separat.
+        const Mat stanga  = thresh(Rect(0,          0, jumatate_x,            thresh.rows));
         const Mat dreapta = thresh(Rect(jumatate_x, 0, thresh.cols - jumatate_x, thresh.rows));
 
-        proceseaza_coloana(stanga, {0U, static_cast<size_t>(intrebari_coloana - 1)}); 
+        proceseaza_coloana(stanga,  {0U, static_cast<size_t>(intrebari_coloana - 1)}); 
         proceseaza_coloana(dreapta, {static_cast<size_t>(intrebari_coloana), static_cast<size_t>(max_intrebari - 1)}); 
 
-        return 1; 
+        return 1; //imagine procesata cu succes
     }
 
+    // Verifica daca raspunsul studentului la intrebarea nr_intrebare e corect
     auto proceseaza_intrebare_opencv(int nr_intrebare) -> int {
         const auto index = static_cast<size_t>(nr_intrebare - 1); 
         if (raspunsuri_student.at(index) == -1) {
-            return 0;
+            return 0; //nicio bula marcata = raspuns lipsa = gresit
         } 
         if (raspunsuri_student.at(index) == barem_corect.at(index)) {
-            return 1;
+            return 1; //raspuns corect
         } 
-        return 0; 
+        return 0; //raspuns gresit
     }
-}
+
+} // extern "C"
 // NOLINTEND(misc-include-cleaner, misc-header-include-cycle)
