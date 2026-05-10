@@ -4,25 +4,36 @@
 #include <unistd.h>     /* close */
 #include <sys/socket.h> /* socket, connect, send, recv */
 #include <netinet/in.h> /* struct sockaddr_in, htons */
-#include <arpa/inet.h>  /* inet_addr */
+#include <arpa/inet.h>  /* inet_pton */
 
 enum Configurare {
-    PORT_SERVER = 9090,
-    DIM_BUFFER  = 4096,
-    DIM_SELECTIE = 16
+    PORT_SERVER        = 9090,
+    DIM_BUFFER         = 4096,
+    DIM_SELECTIE       = 16,
+    QUIT_MSG_LEN       = 4,
+    EXIT_STATUS_OK     = 0,
+    EXIT_STATUS_ERR    = 1,
+    INVALID_DESCRIPTOR = -1
 };
+
+static void safe_close(int descriptor) {
+    if (descriptor != INVALID_DESCRIPTOR) {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe)
+        if (close(descriptor) == INVALID_DESCRIPTOR) {
+            perror("[ERR] close");
+        }
+    }
+}
 
 void afiseaza_meniu(void) {
     (void)printf("\n=== MENIU ===\n");
     (void)printf("1. Corecteaza test (introduce calea imaginii)\n");
     (void)printf("2. Iesire\n");
     (void)printf("Selectie: ");
-    // Folosirea fflush pentru a scrie direct pe ecran in loc de buffer
     (void)fflush(stdout); 
 }
 
 void proceseaza_optiunea_unu(int socket_comunicare) {
-    // Initializarea cu {0} pentru a nu avea gunoi din memorie, similar cu memset
     char cale_imagine[DIM_BUFFER] = {0};
     char mesaj_server[DIM_BUFFER] = {0};
     char raspuns_server[DIM_BUFFER] = {0};
@@ -30,9 +41,7 @@ void proceseaza_optiunea_unu(int socket_comunicare) {
     (void)printf("Calea imaginii: ");
     (void)fflush(stdout);
     
-    // Folosirea fgets pentru citirea pathului intreg introdus
     if (fgets(cale_imagine, DIM_BUFFER, stdin) != NULL) {
-        // Folosirea strcspn pentru a inlocui \n de la inputul cu enter cu \0 (finalul de string)
         cale_imagine[strcspn(cale_imagine, "\n")] = '\0';
 
         if (strlen(cale_imagine) == 0) {
@@ -40,19 +49,16 @@ void proceseaza_optiunea_unu(int socket_comunicare) {
             return;
         }
 
-// Construim mesajul manual, caracter cu caracter
         size_t index_mesaj = 0;
         const char *prefix_comanda = "grade:";
 
-        // Copiem comanda litera cu litera
-        while (prefix_comanda[index_mesaj] != '\0' && index_mesaj < (size_t)DIM_BUFFER - 1) {
+        while (prefix_comanda[index_mesaj] != '\0' && index_mesaj < (size_t)(DIM_BUFFER - 1)) {
             mesaj_server[index_mesaj] = prefix_comanda[index_mesaj];
             index_mesaj++;
         }
 
-        //Copiem calea imaginii litera cu litera
         size_t index_cale = 0;
-        while (cale_imagine[index_cale] != '\0' && index_mesaj < (size_t)DIM_BUFFER - 1) {
+        while (cale_imagine[index_cale] != '\0' && index_mesaj < (size_t)(DIM_BUFFER - 1)) {
             mesaj_server[index_mesaj] = cale_imagine[index_cale];
             index_mesaj++;
             index_cale++;
@@ -60,40 +66,46 @@ void proceseaza_optiunea_unu(int socket_comunicare) {
         mesaj_server[index_mesaj] = '\0';
         
         (void)printf("[Client] Trimit catre server: '%s'\n", mesaj_server);
-        // Trimitem mesajul si numarul de octeti al sau 
-        (void)send(socket_comunicare, mesaj_server, strlen(mesaj_server), 0);
         
+        ssize_t octeti_trimisi = send(socket_comunicare, mesaj_server, strlen(mesaj_server), 0);
+        if (octeti_trimisi < 0) {
+            perror("[ERR] send");
+            return;
+        }
         
-        ssize_t octeti_primiti = recv(socket_comunicare, raspuns_server, (size_t)DIM_BUFFER - 1, 0);
+        ssize_t octeti_primiti = recv(socket_comunicare, raspuns_server, (size_t)(DIM_BUFFER - 1), 0);
         
         if (octeti_primiti <= 0) {
             (void)printf("[ERR] Serverul s-a deconectat.\n");
         } else {
+            raspuns_server[octeti_primiti] = '\0';
             (void)printf("\n[Rezultat] %s\n", raspuns_server);
         }
     }
 }
 
 int main(void) {
-    // Folosirea socketului cu IPV4 , TCP
     int descriptor_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (descriptor_socket < 0) {
         perror("[ERR] socket");
-        return 1;
+        return EXIT_STATUS_ERR;
     }
 
-    // Initializare directa fara variabile din memorie, echivalent cu memset
     struct sockaddr_in adresa_server = {0};
-    
     adresa_server.sin_family = AF_INET;
-    // Folosim htons pentru a fi aliniat portul
-    adresa_server.sin_port = htons(PORT_SERVER);
-    adresa_server.sin_addr.s_addr = inet_addr("127.0.0.1");
+    adresa_server.sin_port   = htons(PORT_SERVER);
+
+    // Folosim inet_pton in loc de inet_addr pentru siguranta maxima si conformitate POSIX
+    if (inet_pton(AF_INET, "127.0.0.1", &adresa_server.sin_addr) <= 0) {
+        perror("[ERR] inet_pton");
+        safe_close(descriptor_socket);
+        return EXIT_STATUS_ERR;
+    }
 
     if (connect(descriptor_socket, (const struct sockaddr *)&adresa_server, (socklen_t)sizeof(adresa_server)) < 0) {
         perror("[ERR] connect - serverul nu e pornit?");
-        (void)close(descriptor_socket);
-        return 1;
+        safe_close(descriptor_socket);
+        return EXIT_STATUS_ERR;
     }
 
     (void)printf("[GradingApp] Conectat la server pe portul %d\n", PORT_SERVER);
@@ -108,18 +120,20 @@ int main(void) {
         }
         buffer_selectie[strcspn(buffer_selectie, "\n")] = '\0';
 
-        // Verificam optiunea selectata si returnam rezultatul sau eroare
         if (strcmp(buffer_selectie, "1") == 0) {
             proceseaza_optiunea_unu(descriptor_socket);
         } else if (strcmp(buffer_selectie, "2") == 0) {
-            (void)send(descriptor_socket, "quit", 4, 0);
+            ssize_t res_send = send(descriptor_socket, "quit", (size_t)QUIT_MSG_LEN, 0);
+            if (res_send < 0) {
+                perror("[ERR] send quit");
+            }
             (void)printf("[Client] Conexiune inchisa.\n");
             break;
         } else {
             (void)printf("[ERR] Selectie invalida. Alege 1 sau 2.\n");
         }
     }
-    // Inchiderea socketului pentru a nu avea memory leak
-    (void)close(descriptor_socket);
-    return 0;
+    
+    safe_close(descriptor_socket);
+    return EXIT_STATUS_OK;
 }
