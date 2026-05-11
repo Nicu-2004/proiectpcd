@@ -1,139 +1,116 @@
-#include <stdio.h>      /* printf, perror, fgets, fflush */
-#include <stdlib.h>     /* exit */
-#include <string.h>     /* strcmp, strlen, strcspn */
-#include <unistd.h>     /* close */
-#include <sys/socket.h> /* socket, connect, send, recv */
-#include <netinet/in.h> /* struct sockaddr_in, htons */
-#include <arpa/inet.h>  /* inet_pton */
+#define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/sendfile.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
-enum Configurare {
+/* Headerul aplicatiei noastre pentru organizarea chunk-urilor TCP */
+typedef struct {
+    char magic[4];      /* Identificator de protocol: "OMR\0" */
+    uint32_t file_size; /* Marimea fisierului in octeti (Network Byte Order) */
+} app_header_t;
+
+enum ConfigClient {
     PORT_SERVER        = 9090,
     DIM_BUFFER         = 4096,
-    DIM_SELECTIE       = 16,
-    QUIT_MSG_LEN       = 4,
-    EXIT_STATUS_OK     = 0,
-    EXIT_STATUS_ERR    = 1,
-    INVALID_DESCRIPTOR = -1
+    INVALID_DESCRIPTOR = -1,
+    STATUS_SUCCESS     = 0,
+    STATUS_FAILURE     = 1
 };
 
-static void safe_close(int descriptor) {
-    if (descriptor != INVALID_DESCRIPTOR) {
+static void safe_close(int fd) {
+    if (fd != INVALID_DESCRIPTOR) {
         // NOLINTNEXTLINE(concurrency-mt-unsafe)
-        if (close(descriptor) == INVALID_DESCRIPTOR) {
-            perror("[ERR] close");
-        }
-    }
-}
-
-void afiseaza_meniu(void) {
-    (void)printf("\n=== MENIU ===\n");
-    (void)printf("1. Corecteaza test (introduce calea imaginii)\n");
-    (void)printf("2. Iesire\n");
-    (void)printf("Selectie: ");
-    (void)fflush(stdout); 
-}
-
-void proceseaza_optiunea_unu(int socket_comunicare) {
-    char cale_imagine[DIM_BUFFER] = {0};
-    char mesaj_server[DIM_BUFFER] = {0};
-    char raspuns_server[DIM_BUFFER] = {0};
-
-    (void)printf("Calea imaginii: ");
-    (void)fflush(stdout);
-    
-    if (fgets(cale_imagine, DIM_BUFFER, stdin) != NULL) {
-        cale_imagine[strcspn(cale_imagine, "\n")] = '\0';
-
-        if (strlen(cale_imagine) == 0) {
-            (void)printf("[ERR] Calea nu poate fi goala.\n");
-            return;
-        }
-
-        size_t index_mesaj = 0;
-        const char *prefix_comanda = "grade:";
-
-        while (prefix_comanda[index_mesaj] != '\0' && index_mesaj < (size_t)(DIM_BUFFER - 1)) {
-            mesaj_server[index_mesaj] = prefix_comanda[index_mesaj];
-            index_mesaj++;
-        }
-
-        size_t index_cale = 0;
-        while (cale_imagine[index_cale] != '\0' && index_mesaj < (size_t)(DIM_BUFFER - 1)) {
-            mesaj_server[index_mesaj] = cale_imagine[index_cale];
-            index_mesaj++;
-            index_cale++;
-        }
-        mesaj_server[index_mesaj] = '\0';
-        
-        (void)printf("[Client] Trimit catre server: '%s'\n", mesaj_server);
-        
-        ssize_t octeti_trimisi = send(socket_comunicare, mesaj_server, strlen(mesaj_server), 0);
-        if (octeti_trimisi < 0) {
-            perror("[ERR] send");
-            return;
-        }
-        
-        ssize_t octeti_primiti = recv(socket_comunicare, raspuns_server, (size_t)(DIM_BUFFER - 1), 0);
-        
-        if (octeti_primiti <= 0) {
-            (void)printf("[ERR] Serverul s-a deconectat.\n");
-        } else {
-            raspuns_server[octeti_primiti] = '\0';
-            (void)printf("\n[Rezultat] %s\n", raspuns_server);
+        if (close(fd) == INVALID_DESCRIPTOR) {
+            perror("[WARN] Eroare inchidere descriptor");
         }
     }
 }
 
 int main(void) {
-    int descriptor_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (descriptor_socket < 0) {
-        perror("[ERR] socket");
-        return EXIT_STATUS_ERR;
+    char cale_fisier[DIM_BUFFER];
+    printf("Introdu calea imaginii OMR pentru corectare (ex: photo.png): ");
+    fflush(stdout);
+
+    if (fgets(cale_fisier, DIM_BUFFER, stdin) == NULL) { return STATUS_FAILURE; }
+    cale_fisier[strcspn(cale_fisier, "\n")] = '\0';
+
+    /* 1. Deschidem fisierul si citim metadatele (dimensiunea) */
+    int file_fd = open(cale_fisier, O_RDONLY);
+    if (file_fd < 0) {
+        perror("[ERR] Nu am putut deschide fisierul specificat");
+        return STATUS_FAILURE;
     }
 
-    struct sockaddr_in adresa_server = {0};
-    adresa_server.sin_family = AF_INET;
-    adresa_server.sin_port   = htons(PORT_SERVER);
-
-    // Folosim inet_pton in loc de inet_addr pentru siguranta maxima si conformitate POSIX
-    if (inet_pton(AF_INET, "127.0.0.1", &adresa_server.sin_addr) <= 0) {
-        perror("[ERR] inet_pton");
-        safe_close(descriptor_socket);
-        return EXIT_STATUS_ERR;
+    struct stat stat_buf;
+    if (fstat(file_fd, &stat_buf) < 0) {
+        perror("[ERR] Eroare la citirea dimensiunii fisierului");
+        safe_close(file_fd);
+        return STATUS_FAILURE;
     }
 
-    if (connect(descriptor_socket, (const struct sockaddr *)&adresa_server, (socklen_t)sizeof(adresa_server)) < 0) {
-        perror("[ERR] connect - serverul nu e pornit?");
-        safe_close(descriptor_socket);
-        return EXIT_STATUS_ERR;
+    /* 2. Cream Socket-ul si ne conectam la Server */
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) { perror("[ERR] socket"); safe_close(file_fd); return STATUS_FAILURE; }
+
+    struct sockaddr_in srv_addr;
+    memset(&srv_addr, 0, sizeof(struct sockaddr_in));
+    srv_addr.sin_family = AF_INET;
+    srv_addr.sin_port   = htons(PORT_SERVER);
+
+    if (inet_pton(AF_INET, "127.0.0.1", &srv_addr.sin_addr) <= 0) {
+        perror("[ERR] inet_pton"); safe_close(sock); safe_close(file_fd); return STATUS_FAILURE;
     }
 
-    (void)printf("[GradingApp] Conectat la server pe portul %d\n", PORT_SERVER);
-
-    char buffer_selectie[DIM_SELECTIE] = {0};
-
-    while (1) {
-        afiseaza_meniu();
-
-        if (fgets(buffer_selectie, DIM_SELECTIE, stdin) == NULL) {
-            break; 
-        }
-        buffer_selectie[strcspn(buffer_selectie, "\n")] = '\0';
-
-        if (strcmp(buffer_selectie, "1") == 0) {
-            proceseaza_optiunea_unu(descriptor_socket);
-        } else if (strcmp(buffer_selectie, "2") == 0) {
-            ssize_t res_send = send(descriptor_socket, "quit", (size_t)QUIT_MSG_LEN, 0);
-            if (res_send < 0) {
-                perror("[ERR] send quit");
-            }
-            (void)printf("[Client] Conexiune inchisa.\n");
-            break;
-        } else {
-            (void)printf("[ERR] Selectie invalida. Alege 1 sau 2.\n");
-        }
+    printf("[Client] Ma conectez la serverul %s:%d...\n", "127.0.0.1", PORT_SERVER);
+    if (connect(sock, (struct sockaddr*)&srv_addr, (socklen_t)sizeof(srv_addr)) < 0) {
+        perror("[ERR] Conexiune esuata"); safe_close(sock); safe_close(file_fd); return STATUS_FAILURE;
     }
+
+    /* 3. Definim si trimitem HEADER-UL aplicatiei (Mesajul 1) */
+    app_header_t header;
+    strncpy(header.magic, "OMR", 4);
+    header.file_size = htonl((uint32_t)stat_buf.st_size); /* impachetare sigura pe retea */
+
+    printf("[Client] Trimit Header: %u octeti pregatiti...\n", (unsigned int)stat_buf.st_size);
+    if (send(sock, &header, sizeof(app_header_t), 0) < 0) {
+        perror("[ERR] Eroare trimitere header"); safe_close(sock); safe_close(file_fd); return STATUS_FAILURE;
+    }
+
+    /* 4. Trimitem CONTINUTUL fisierului folosind optimizarea SENDFILE (Mesajul 2) */
+    printf("[Client] Trimit continutul binar (zero-copy sendfile)...\n");
+    off_t offset = 0;
+    ssize_t trimisi = sendfile(sock, file_fd, &offset, (size_t)stat_buf.st_size);
     
-    safe_close(descriptor_socket);
-    return EXIT_STATUS_OK;
+    if (trimisi != (ssize_t)stat_buf.st_size) {
+        perror("[ERR] Eroare la transferul sendfile"); safe_close(sock); safe_close(file_fd); return STATUS_FAILURE;
+    }
+    safe_close(file_fd); /* Fisierul sursa nu mai e necesar */
+
+    /* 5. Asteptam sincron primirea raspunsului de la server */
+    printf("[Client] Fisier trimis complet! Astept sincron corectarea de la server...\n");
+    char raspuns[DIM_BUFFER];
+    memset(raspuns, 0, DIM_BUFFER);
+
+    ssize_t rres = recv(sock, raspuns, DIM_BUFFER - 1, 0);
+    if (rres <= 0) {
+        printf("[ERR] Serverul a inchis conexiunea neasteptat.\n");
+    } else {
+        raspuns[rres] = '\0';
+        printf("\n========================================\n");
+        printf("[REZULTAT PRIMIT] %s\n", raspuns);
+        printf("========================================\n");
+    }
+
+    /* 6. Final: interactiunea s-a incheiat, inchidem socketul */
+    safe_close(sock);
+    printf("[Client] Interactiune incheiata cu succes. Socket inchis.\n");
+    return STATUS_SUCCESS;
 }
