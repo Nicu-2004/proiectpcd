@@ -16,7 +16,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* Headerul aplicatiei mapat identic ca in client */
+// Headerul aplicatiei mapat identic ca in client 
 typedef struct {
     char magic[4];
     uint32_t file_size;
@@ -37,6 +37,7 @@ enum ConfigServer {
     STATUS_FAILURE       = 1
 };
 
+// socket unix pentru conexiunea cu adminul
 static const float FACTOR_ZECIMALA = 10.0F;
 static const char* UNIX_SOCKET_PATH = "/tmp/omr_admin.sock";
 
@@ -46,7 +47,7 @@ extern int proceseaza_intrebare_opencv(int nr_intrebare);
 typedef struct {
     unsigned int job_id;
     char file_path[BUFFER_CAPACITY];
-    int client_socket_fd; /* Retinem socket-ul pentru a returna raspunsul sincron */
+    int client_socket_fd;
 } omr_job_t;
 
 typedef struct {
@@ -90,9 +91,6 @@ static void adauga_in_istoric(const char* inreg) {
     pthread_mutex_unlock(&g_metrics.mutex);
 }
 
-/* ========================================================================== */
-/* COADA FIFO                                                                 */
-/* ========================================================================== */
 
 static void init_queue(void) {
     memset(&g_queue, 0, sizeof(job_queue_t));
@@ -104,7 +102,7 @@ static void init_queue(void) {
 static void enqueue_job(const char* cale, int clt_fd) {
     pthread_mutex_lock(&g_queue.mutex);
     if (g_queue.count >= MAX_QUEUE_JOBS) {
-        /* Daca coada e plina, respingem pe loc */
+        // Daca coada e plina, respingem pe loc
         char *err = "ERR: Coada serverului este plina!";
         (void)send(clt_fd, err, strlen(err), 0);
         safe_close(clt_fd);
@@ -125,9 +123,6 @@ static void enqueue_job(const char* cale, int clt_fd) {
     pthread_mutex_unlock(&g_queue.mutex);
 }
 
-/* ========================================================================== */
-/* FIRUL DE LUCRU (Worker) - Corecteaza si Răspunde Sincron                   */
-/* ========================================================================== */
 
 static float executa_evaluare_test(const char *cale_imagine) {
     if (incarca_imagine_opencv(cale_imagine) == 0) { return -1.0F; }
@@ -167,7 +162,7 @@ static void* worker_thread_func(void* arg) {
         strncpy(g_metrics.current_processing_file, path_copie, BUFFER_CAPACITY - 1);
         pthread_mutex_unlock(&g_metrics.mutex);
 
-        /* Procesare intensiva OpenCV */
+        
         clock_gettime(CLOCK_MONOTONIC, &start_t);
         float nota = executa_evaluare_test(path_copie);
         clock_gettime(CLOCK_MONOTONIC, &end_t);
@@ -175,7 +170,7 @@ static void* worker_thread_func(void* arg) {
         double d_ms = (double)(end_t.tv_sec - start_t.tv_sec) * 1000.0 + 
                       (double)(end_t.tv_nsec - start_t.tv_nsec) / 1000000.0;
 
-        /* Returnam raspunsul sincron direct pe socket-ul asteptator */
+        
         memset(raspuns, 0, BUFFER_CAPACITY);
         if (nota < 0.0F) {
             strncpy(raspuns, "Eroare: Imaginea nu a putut fi procesata optic.", BUFFER_CAPACITY - 1);
@@ -188,14 +183,14 @@ static void* worker_thread_func(void* arg) {
 
         if (clt_sock != INVALID_DESCRIPTOR) {
             (void)send(clt_sock, raspuns, strlen(raspuns), 0);
-            safe_close(clt_sock); /* Final: inchidem conexiunea conform pasilor */
+            safe_close(clt_sock);
             
             pthread_mutex_lock(&g_metrics.mutex);
             g_metrics.active_inet_clients--;
             pthread_mutex_unlock(&g_metrics.mutex);
         }
 
-        /* Curatam fisierul temporar de pe disc concomitent */
+        
         (void)unlink(path_copie);
 
         char inreg_ist[BUFFER_CAPACITY];
@@ -213,10 +208,6 @@ static void* worker_thread_func(void* arg) {
     }
     return NULL;
 }
-
-/* ========================================================================== */
-/* FIRUL INET CU POLL() - Receptie Header + Salvare Concomitenta              */
-/* ========================================================================== */
 
 static void* inet_thread_func(void* arg) {
     (void)arg;
@@ -247,7 +238,6 @@ static void* inet_thread_func(void* arg) {
         int p_cnt = poll(fds, MAX_CLIENTS_POLL, POLL_TIMEOUT_MS);
         if (p_cnt <= 0) { continue; }
 
-        /* Acceptam conexiuni noi */
         if ((fds[0].revents & POLLIN) != 0) {
             int new_sock = accept(srv_sock, NULL, NULL);
             if (new_sock >= 0) {
@@ -263,26 +253,26 @@ static void* inet_thread_func(void* arg) {
             }
         }
 
-        /* Citim date de pe clientii existenti */
+        
         for (int i = 1; i < MAX_CLIENTS_POLL; i++) {
             if (fds[i].fd != INVALID_DESCRIPTOR && ((fds[i].revents & POLLIN) != 0)) {
                 int clt_fd = fds[i].fd;
                 
-                /* 1. Citim HEADER-UL aplicatiei (Mesajul 1) */
+                
                 app_header_t header;
                 ssize_t h_bytes = recv(clt_fd, &header, sizeof(app_header_t), MSG_WAITALL);
                 
                 if (h_bytes == (ssize_t)sizeof(app_header_t) && strncmp(header.magic, "OMR", 3) == 0) {
                     uint32_t file_size = ntohl(header.file_size);
                     
-                    /* 2. Deschidem un fisier temporar concomitent pe disc */
+                    
                     char temp_path[BUFFER_CAPACITY];
                     // NOLINTNEXTLINE(stdio-snprintf, security-snprintf)
                     snprintf(temp_path, BUFFER_CAPACITY, "/tmp/omr_recv_%d_%ld.png", clt_fd, time(NULL));
                     
                     int out_fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
                     if (out_fd >= 0) {
-                        /* 3. Citim octetii din socket in bucla si ii scriem pe disc */
+                        
                         uint32_t ramasi = file_size;
                         while (ramasi > 0) {
                             size_t de_citit = (ramasi > (uint32_t)BUFFER_CAPACITY) ? (size_t)BUFFER_CAPACITY : (size_t)ramasi;
@@ -295,17 +285,15 @@ static void* inet_thread_func(void* arg) {
                         safe_close(out_fd);
 
                         if (ramasi == 0) {
-                            /* Scoatem descriptorul din poll() pentru a nu declansa evenimente, 
-                               dar IL LASAM DESCHIS si il pasam in coada FIFO! */
+                           
                             fds[i].fd = INVALID_DESCRIPTOR;
                             enqueue_job(temp_path, clt_fd);
                             continue; 
                         }
-                        (void)unlink(temp_path); /* Corupt */
+                        (void)unlink(temp_path);
                     }
                 }
                 
-                /* Daca protocolul a esuat sau clientul a dat deconectare */
                 safe_close(clt_fd);
                 fds[i].fd = INVALID_DESCRIPTOR;
                 pthread_mutex_lock(&g_metrics.mutex);
@@ -318,10 +306,6 @@ static void* inet_thread_func(void* arg) {
     return NULL;
 }
 
-/* ========================================================================== */
-/* FIRUL ADMIN (UNIX SOCKET) - Ramane identic si functional                   */
-/* ========================================================================== */
-/* (Inlocuieste cu implementarea admin_thread_func existenta din blocul anterior) */
 static void* admin_thread_func(void* arg) {
     (void)arg;
     int unix_sock = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -350,13 +334,12 @@ static void* admin_thread_func(void* arg) {
     pfd.events = POLLIN;
 
     while (g_server_running) {
-        /* Daca nu avem admin, ascultam pe socketul principal, altfel pe socketul adminului curent */
+        
         pfd.fd = (active_admin_fd == INVALID_DESCRIPTOR) ? unix_sock : active_admin_fd;
         int pcount = poll(&pfd, 1, POLL_TIMEOUT_MS);
 
         if (pcount < 0) { if (errno == EINTR) { continue; } break; }
 
-        /* Gestiunea TIMEOUT-ului de inactivitate (Cerinta Nivel A) */
         if (active_admin_fd != INVALID_DESCRIPTOR) {
             time_t now = time(NULL);
             if (now - last_activity_time > TIMEOUT_ADMIN_SEC) {
@@ -371,7 +354,6 @@ static void* admin_thread_func(void* arg) {
 
         if (pcount == 0) { continue; }
 
-        /* Logică de ACCEPT (Conectare Admin Nou) */
         if (active_admin_fd == INVALID_DESCRIPTOR && ((pfd.revents & POLLIN) != 0)) {
             active_admin_fd = accept(unix_sock, NULL, NULL);
             if (active_admin_fd >= 0) {
@@ -379,7 +361,6 @@ static void* admin_thread_func(void* arg) {
                 printf("[Server Admin] Administrator nou conectat.\n");
             }
         } 
-        /* Logică de COMENZI (Admin existent trimite raport) */
         else if (active_admin_fd != INVALID_DESCRIPTOR && ((pfd.revents & POLLIN) != 0)) {
             memset(buf, 0, BUFFER_CAPACITY);
             ssize_t bytes = recv(active_admin_fd, buf, BUFFER_CAPACITY - 1, 0);
@@ -395,7 +376,6 @@ static void* admin_thread_func(void* arg) {
             buf[bytes] = '\0';
             memset(raport, 0, sizeof(raport));
 
-            /* Generare Rapoarte (Cele 6 categorii din barem) */
             pthread_mutex_lock(&g_metrics.mutex);
             if (strcmp(buf, "report:clients") == 0) {
                 sprintf(raport, "Clienti INET activi: %d", g_metrics.active_inet_clients);

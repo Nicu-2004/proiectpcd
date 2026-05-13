@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
+// Variabile pentru a seta dimensiune sau pentru verificare status
 enum ConfigAdmin {
     DIM_BUFFER         = 4096,
     DIM_SELECTIE       = 16,
@@ -14,8 +15,10 @@ enum ConfigAdmin {
     STATUS_FAILURE     = 1
 };
 
+// Adresa socket-ului local
 static const char* UNIX_SOCKET_PATH = "/tmp/omr_admin.sock";
 
+// Functie de safe close daca mai exista o conexiune
 static void safe_close(int fd) {
     if (fd != INVALID_DESCRIPTOR) {
         // NOLINTNEXTLINE(concurrency-mt-unsafe)
@@ -25,6 +28,7 @@ static void safe_close(int fd) {
     }
 }
 
+// Meniu de optiuni pentru administrator
 static void afiseaza_meniu_admin(void) {
     printf("\n================ PANOU ADMINISTRATOR (Nivel A) ================\n");
     printf("1. Raport: Număr clienți INET conectați simultan\n");
@@ -39,6 +43,7 @@ static void afiseaza_meniu_admin(void) {
     fflush(stdout);
 }
 
+// Cerere raport catre server prin socket
 static void cere_raport(int sock, const char* cod_raport) {
     ssize_t sres = send(sock, cod_raport, strlen(cod_raport), 0);
     if (sres < 0) { perror("[ERR] Trimitere esuata (timeout de inactivitate atins?)"); return; }
@@ -57,11 +62,14 @@ static void cere_raport(int sock, const char* cod_raport) {
 }
 
 int main(void) {
+// Initializare socket unix in format TCP
     int sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) { perror("[ERR] socket"); return STATUS_FAILURE; }
 
+// Initializare structura unix pe variabila un_addr
     struct sockaddr_un un_addr;
     memset(&un_addr, 0, sizeof(struct sockaddr_un));
+    // Setarea adresa locala a socketului
     un_addr.sun_family = AF_UNIX;
     strncpy(un_addr.sun_path, UNIX_SOCKET_PATH, sizeof(un_addr.sun_path) - 1);
 
