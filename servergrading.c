@@ -16,7 +16,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-// Headerul aplicatiei mapat identic ca in client 
 typedef struct {
     char magic[4];
     uint32_t file_size;
@@ -37,7 +36,6 @@ enum ConfigServer {
     STATUS_FAILURE       = 1
 };
 
-// socket unix pentru conexiunea cu adminul
 static const float FACTOR_ZECIMALA = 10.0F;
 static const char* UNIX_SOCKET_PATH = "/tmp/omr_admin.sock";
 
@@ -75,9 +73,81 @@ static job_queue_t      g_queue;
 static server_metrics_t g_metrics;
 static volatile sig_atomic_t g_server_running = 1;
 
+// ---------- Funcții sigure înlocuitoare ----------
+static void safe_memset(void *ptr, int value, size_t n) {
+    unsigned char *p = (unsigned char*)ptr;
+    for (size_t i = 0; i < n; ++i) p[i] = (unsigned char)value;
+}
+
+static void safe_strcpy(char *dest, size_t dest_size, const char *src) {
+    if (dest_size == 0) return;
+    size_t i;
+    for (i = 0; i < dest_size - 1 && src[i] != '\0'; ++i) {
+        dest[i] = src[i];
+    }
+    dest[i] = '\0';
+}
+
+static void safe_strcat(char *dest, size_t dest_size, const char *src) {
+    size_t dest_len = 0;
+    while (dest_len < dest_size && dest[dest_len] != '\0') ++dest_len;
+    if (dest_len >= dest_size) return;
+    size_t i = 0;
+    while (dest_len + i < dest_size - 1 && src[i] != '\0') {
+        dest[dest_len + i] = src[i];
+        ++i;
+    }
+    dest[dest_len + i] = '\0';
+}
+
+static int safe_int_to_str(char *buf, size_t size, int val) {
+    if (size == 0) return 0;
+    int is_neg = (val < 0);
+    unsigned int n = is_neg ? (unsigned int)(-val) : (unsigned int)val;
+    char tmp[32];
+    int idx = 0;
+    do {
+        tmp[idx++] = (char)('0' + (n % 10));
+        n /= 10;
+    } while (n > 0);
+    if (is_neg) tmp[idx++] = '-';
+    if ((size_t)idx >= size) idx = (int)size - 1;
+    for (int i = 0; i < idx; ++i) buf[i] = tmp[idx - 1 - i];
+    buf[idx] = '\0';
+    return idx;
+}
+
+static int safe_double_to_str(char *buf, size_t size, double val, int prec) {
+    if (size == 0) return 0;
+    int int_part = (int)val;
+    double frac = val - (double)int_part;
+    if (frac < 0) frac = -frac;
+    char int_buf[32];
+    safe_int_to_str(int_buf, sizeof(int_buf), int_part);
+    int pos = 0;
+    safe_strcpy(buf, size, int_buf);
+    pos = (int)strlen(buf);
+    if (pos < (int)size && prec > 0) {
+        buf[pos++] = '.';
+        if (pos < (int)size) {
+            unsigned int mult = 1;
+            for (int i = 0; i < prec; ++i) mult *= 10;
+            unsigned int frac_part = (unsigned int)(frac * mult + 0.5);
+            char frac_buf[16];
+            safe_int_to_str(frac_buf, sizeof(frac_buf), (int)frac_part);
+            int len_frac = (int)strlen(frac_buf);
+            if (len_frac < prec) {
+                for (int i = 0; i < prec - len_frac && pos < (int)size - 1; ++i) buf[pos++] = '0';
+            }
+            for (int i = 0; i < len_frac && pos < (int)size - 1; ++i) buf[pos++] = frac_buf[i];
+            buf[pos] = '\0';
+        }
+    }
+    return pos;
+}
+
 static void safe_close(int fd) {
     if (fd != INVALID_DESCRIPTOR) {
-        // NOLINTNEXTLINE(concurrency-mt-unsafe)
         if (close(fd) == INVALID_DESCRIPTOR) { perror("[WARN] Eroare close"); }
     }
 }
@@ -85,15 +155,13 @@ static void safe_close(int fd) {
 static void adauga_in_istoric(const char* inreg) {
     pthread_mutex_lock(&g_metrics.mutex);
     int idx = g_metrics.history_count % MAX_HISTORY_RECORDS;
-    strncpy(g_metrics.history[idx], inreg, BUFFER_CAPACITY - 1);
-    g_metrics.history[idx][BUFFER_CAPACITY - 1] = '\0';
+    safe_strcpy(g_metrics.history[idx], BUFFER_CAPACITY, inreg);
     g_metrics.history_count++;
     pthread_mutex_unlock(&g_metrics.mutex);
 }
 
-
 static void init_queue(void) {
-    memset(&g_queue, 0, sizeof(job_queue_t));
+    safe_memset(&g_queue, 0, sizeof(job_queue_t));
     g_queue.next_job_id = 100;
     pthread_mutex_init(&g_queue.mutex, NULL);
     pthread_cond_init(&g_queue.cond, NULL);
@@ -102,7 +170,6 @@ static void init_queue(void) {
 static void enqueue_job(const char* cale, int clt_fd) {
     pthread_mutex_lock(&g_queue.mutex);
     if (g_queue.count >= MAX_QUEUE_JOBS) {
-        // Daca coada e plina, respingem pe loc
         char *err = "ERR: Coada serverului este plina!";
         (void)send(clt_fd, err, strlen(err), 0);
         safe_close(clt_fd);
@@ -112,8 +179,7 @@ static void enqueue_job(const char* cale, int clt_fd) {
 
     int t_idx = g_queue.tail;
     g_queue.jobs[t_idx].job_id = g_queue.next_job_id++;
-    strncpy(g_queue.jobs[t_idx].file_path, cale, BUFFER_CAPACITY - 1);
-    g_queue.jobs[t_idx].file_path[BUFFER_CAPACITY - 1] = '\0';
+    safe_strcpy(g_queue.jobs[t_idx].file_path, BUFFER_CAPACITY, cale);
     g_queue.jobs[t_idx].client_socket_fd = clt_fd;
 
     g_queue.tail = (g_queue.tail + 1) % MAX_QUEUE_JOBS;
@@ -123,10 +189,8 @@ static void enqueue_job(const char* cale, int clt_fd) {
     pthread_mutex_unlock(&g_queue.mutex);
 }
 
-
 static float executa_evaluare_test(const char *cale_imagine) {
     if (incarca_imagine_opencv(cale_imagine) == 0) { return -1.0F; }
-    
     int total_corecte = 0;
     for (int contor = 1; contor <= NR_INTREBARI_TEST; contor++) {
         total_corecte += proceseaza_intrebare_opencv(contor);
@@ -138,6 +202,7 @@ static void* worker_thread_func(void* arg) {
     (void)arg;
     struct timespec start_t, end_t;
     char raspuns[BUFFER_CAPACITY];
+    char path_copie[BUFFER_CAPACITY];
 
     while (g_server_running) {
         pthread_mutex_lock(&g_queue.mutex);
@@ -147,10 +212,7 @@ static void* worker_thread_func(void* arg) {
         if (!g_server_running) { pthread_mutex_unlock(&g_queue.mutex); break; }
 
         int cur_idx = g_queue.head;
-        char path_copie[BUFFER_CAPACITY];
-        strncpy(path_copie, g_queue.jobs[cur_idx].file_path, BUFFER_CAPACITY - 1);
-        path_copie[BUFFER_CAPACITY - 1] = '\0';
-        
+        safe_strcpy(path_copie, BUFFER_CAPACITY, g_queue.jobs[cur_idx].file_path);
         int clt_sock = g_queue.jobs[cur_idx].client_socket_fd;
         unsigned int jid = g_queue.jobs[cur_idx].job_id;
 
@@ -159,44 +221,58 @@ static void* worker_thread_func(void* arg) {
         pthread_mutex_unlock(&g_queue.mutex);
 
         pthread_mutex_lock(&g_metrics.mutex);
-        strncpy(g_metrics.current_processing_file, path_copie, BUFFER_CAPACITY - 1);
+        safe_strcpy(g_metrics.current_processing_file, BUFFER_CAPACITY, path_copie);
         pthread_mutex_unlock(&g_metrics.mutex);
 
-        
         clock_gettime(CLOCK_MONOTONIC, &start_t);
         float nota = executa_evaluare_test(path_copie);
         clock_gettime(CLOCK_MONOTONIC, &end_t);
-        
-        double d_ms = (double)(end_t.tv_sec - start_t.tv_sec) * 1000.0 + 
+
+        double d_ms = (double)(end_t.tv_sec - start_t.tv_sec) * 1000.0 +
                       (double)(end_t.tv_nsec - start_t.tv_nsec) / 1000000.0;
 
-        
-        memset(raspuns, 0, BUFFER_CAPACITY);
+        safe_memset(raspuns, 0, BUFFER_CAPACITY);
         if (nota < 0.0F) {
-            strncpy(raspuns, "Eroare: Imaginea nu a putut fi procesata optic.", BUFFER_CAPACITY - 1);
+            safe_strcpy(raspuns, BUFFER_CAPACITY,
+                        "Eroare: Imaginea nu a putut fi procesata optic.");
         } else {
             int p_int = (int)nota;
             int zec   = (int)((nota - (float)p_int) * FACTOR_ZECIMALA);
-            // NOLINTNEXTLINE(stdio-snprintf, security-snprintf)
-            snprintf(raspuns, BUFFER_CAPACITY, "Succes! Nota acordata: %d.%d / 10", p_int, zec);
+            char tmp[BUFFER_CAPACITY];
+            char num_buf[32];
+            safe_strcpy(tmp, BUFFER_CAPACITY, "Succes! Nota acordata: ");
+            safe_int_to_str(num_buf, sizeof(num_buf), p_int);
+            safe_strcat(tmp, BUFFER_CAPACITY, num_buf);
+            safe_strcat(tmp, BUFFER_CAPACITY, ".");
+            safe_int_to_str(num_buf, sizeof(num_buf), zec);
+            safe_strcat(tmp, BUFFER_CAPACITY, num_buf);
+            safe_strcat(tmp, BUFFER_CAPACITY, " / 10");
+            safe_strcpy(raspuns, BUFFER_CAPACITY, tmp);
         }
 
         if (clt_sock != INVALID_DESCRIPTOR) {
             (void)send(clt_sock, raspuns, strlen(raspuns), 0);
             safe_close(clt_sock);
-            
             pthread_mutex_lock(&g_metrics.mutex);
             g_metrics.active_inet_clients--;
             pthread_mutex_unlock(&g_metrics.mutex);
         }
 
-        
         (void)unlink(path_copie);
 
         char inreg_ist[BUFFER_CAPACITY];
-        // NOLINTNEXTLINE(stdio-snprintf, security-snprintf)
-        snprintf(inreg_ist, BUFFER_CAPACITY, "JOB: %u | Fişier: %s | Timp: %.2f ms | %s", 
-                 jid, path_copie, d_ms, raspuns);
+        char job_id_str[16];
+        char timp_str[32];
+        safe_int_to_str(job_id_str, sizeof(job_id_str), (int)jid);
+        safe_double_to_str(timp_str, sizeof(timp_str), d_ms, 2);
+        safe_strcpy(inreg_ist, BUFFER_CAPACITY, "JOB: ");
+        safe_strcat(inreg_ist, BUFFER_CAPACITY, job_id_str);
+        safe_strcat(inreg_ist, BUFFER_CAPACITY, " | Fişier: ");
+        safe_strcat(inreg_ist, BUFFER_CAPACITY, path_copie);
+        safe_strcat(inreg_ist, BUFFER_CAPACITY, " | Timp: ");
+        safe_strcat(inreg_ist, BUFFER_CAPACITY, timp_str);
+        safe_strcat(inreg_ist, BUFFER_CAPACITY, " ms | ");
+        safe_strcat(inreg_ist, BUFFER_CAPACITY, raspuns);
         adauga_in_istoric(inreg_ist);
 
         pthread_mutex_lock(&g_metrics.mutex);
@@ -215,7 +291,6 @@ static void* inet_thread_func(void* arg) {
     if (srv_sock < 0) { return NULL; }
 
     int opt = 1;
-    // NOLINTNEXTLINE(misc-include-cleaner)
     (void)setsockopt(srv_sock, SOL_SOCKET, SO_REUSEADDR, &opt, (socklen_t)sizeof(opt));
 
     struct sockaddr_in srv_addr = {0};
@@ -229,8 +304,12 @@ static void* inet_thread_func(void* arg) {
     if (listen(srv_sock, LISTEN_BACKLOG) < 0) { safe_close(srv_sock); return NULL; }
 
     struct pollfd fds[MAX_CLIENTS_POLL];
-    for (int i = 0; i < MAX_CLIENTS_POLL; i++) { fds[i].fd = INVALID_DESCRIPTOR; fds[i].events = 0; }
-    fds[0].fd = srv_sock; fds[0].events = POLLIN;
+    for (int i = 0; i < MAX_CLIENTS_POLL; i++) {
+        fds[i].fd = INVALID_DESCRIPTOR;
+        fds[i].events = 0;
+    }
+    fds[0].fd = srv_sock;
+    fds[0].events = POLLIN;
 
     char buf[BUFFER_CAPACITY];
 
@@ -243,7 +322,8 @@ static void* inet_thread_func(void* arg) {
             if (new_sock >= 0) {
                 for (int i = 1; i < MAX_CLIENTS_POLL; i++) {
                     if (fds[i].fd == INVALID_DESCRIPTOR) {
-                        fds[i].fd = new_sock; fds[i].events = POLLIN;
+                        fds[i].fd = new_sock;
+                        fds[i].events = POLLIN;
                         pthread_mutex_lock(&g_metrics.mutex);
                         g_metrics.active_inet_clients++;
                         pthread_mutex_unlock(&g_metrics.mutex);
@@ -253,47 +333,43 @@ static void* inet_thread_func(void* arg) {
             }
         }
 
-        
         for (int i = 1; i < MAX_CLIENTS_POLL; i++) {
             if (fds[i].fd != INVALID_DESCRIPTOR && ((fds[i].revents & POLLIN) != 0)) {
                 int clt_fd = fds[i].fd;
-                
-                
                 app_header_t header;
                 ssize_t h_bytes = recv(clt_fd, &header, sizeof(app_header_t), MSG_WAITALL);
-                
                 if (h_bytes == (ssize_t)sizeof(app_header_t) && strncmp(header.magic, "OMR", 3) == 0) {
                     uint32_t file_size = ntohl(header.file_size);
-                    
-                    
                     char temp_path[BUFFER_CAPACITY];
-                    // NOLINTNEXTLINE(stdio-snprintf, security-snprintf)
-                    snprintf(temp_path, BUFFER_CAPACITY, "/tmp/omr_recv_%d_%ld.png", clt_fd, time(NULL));
-                    
+                    char ts[32];
+                    char num_buf[32];
+                    safe_int_to_str(ts, sizeof(ts), (int)time(NULL));
+                    safe_strcpy(temp_path, BUFFER_CAPACITY, "/tmp/omr_recv_");
+                    safe_int_to_str(num_buf, sizeof(num_buf), clt_fd);
+                    safe_strcat(temp_path, BUFFER_CAPACITY, num_buf);
+                    safe_strcat(temp_path, BUFFER_CAPACITY, "_");
+                    safe_strcat(temp_path, BUFFER_CAPACITY, ts);
+                    safe_strcat(temp_path, BUFFER_CAPACITY, ".png");
+
                     int out_fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
                     if (out_fd >= 0) {
-                        
                         uint32_t ramasi = file_size;
                         while (ramasi > 0) {
                             size_t de_citit = (ramasi > (uint32_t)BUFFER_CAPACITY) ? (size_t)BUFFER_CAPACITY : (size_t)ramasi;
                             ssize_t cititi = recv(clt_fd, buf, de_citit, 0);
                             if (cititi <= 0) { break; }
-                            
                             (void)write(out_fd, buf, (size_t)cititi);
                             ramasi -= (uint32_t)cititi;
                         }
                         safe_close(out_fd);
-
                         if (ramasi == 0) {
-                           
                             fds[i].fd = INVALID_DESCRIPTOR;
                             enqueue_job(temp_path, clt_fd);
-                            continue; 
+                            continue;
                         }
                         (void)unlink(temp_path);
                     }
                 }
-                
                 safe_close(clt_fd);
                 fds[i].fd = INVALID_DESCRIPTOR;
                 pthread_mutex_lock(&g_metrics.mutex);
@@ -313,14 +389,13 @@ static void* admin_thread_func(void* arg) {
 
     (void)unlink(UNIX_SOCKET_PATH);
     struct sockaddr_un un_addr;
-    memset(&un_addr, 0, sizeof(struct sockaddr_un));
+    safe_memset(&un_addr, 0, sizeof(struct sockaddr_un));
     un_addr.sun_family = AF_UNIX;
-    strncpy(un_addr.sun_path, UNIX_SOCKET_PATH, sizeof(un_addr.sun_path) - 1);
+    safe_strcpy(un_addr.sun_path, sizeof(un_addr.sun_path), UNIX_SOCKET_PATH);
 
     if (bind(unix_sock, (struct sockaddr*)&un_addr, (socklen_t)sizeof(struct sockaddr_un)) < 0) {
         perror("[ERR] bind UNIX"); safe_close(unix_sock); return NULL;
     }
-
     if (listen(unix_sock, 1) < 0) {
         perror("[ERR] listen UNIX"); safe_close(unix_sock); return NULL;
     }
@@ -334,10 +409,8 @@ static void* admin_thread_func(void* arg) {
     pfd.events = POLLIN;
 
     while (g_server_running) {
-        
         pfd.fd = (active_admin_fd == INVALID_DESCRIPTOR) ? unix_sock : active_admin_fd;
         int pcount = poll(&pfd, 1, POLL_TIMEOUT_MS);
-
         if (pcount < 0) { if (errno == EINTR) { continue; } break; }
 
         if (active_admin_fd != INVALID_DESCRIPTOR) {
@@ -351,7 +424,6 @@ static void* admin_thread_func(void* arg) {
                 continue;
             }
         }
-
         if (pcount == 0) { continue; }
 
         if (active_admin_fd == INVALID_DESCRIPTOR && ((pfd.revents & POLLIN) != 0)) {
@@ -360,57 +432,83 @@ static void* admin_thread_func(void* arg) {
                 last_activity_time = time(NULL);
                 printf("[Server Admin] Administrator nou conectat.\n");
             }
-        } 
-        else if (active_admin_fd != INVALID_DESCRIPTOR && ((pfd.revents & POLLIN) != 0)) {
-            memset(buf, 0, BUFFER_CAPACITY);
+        } else if (active_admin_fd != INVALID_DESCRIPTOR && ((pfd.revents & POLLIN) != 0)) {
+            safe_memset(buf, 0, BUFFER_CAPACITY);
             ssize_t bytes = recv(active_admin_fd, buf, BUFFER_CAPACITY - 1, 0);
-
             if (bytes <= 0) {
                 safe_close(active_admin_fd);
                 active_admin_fd = INVALID_DESCRIPTOR;
                 printf("[Server Admin] Administrator deconectat.\n");
                 continue;
             }
-
             last_activity_time = time(NULL);
             buf[bytes] = '\0';
-            memset(raport, 0, sizeof(raport));
+            safe_memset(raport, 0, sizeof(raport));
 
             pthread_mutex_lock(&g_metrics.mutex);
             if (strcmp(buf, "report:clients") == 0) {
-                sprintf(raport, "Clienti INET activi: %d", g_metrics.active_inet_clients);
+                char num_buf[32];
+                safe_strcpy(raport, sizeof(raport), "Clienti INET activi: ");
+                safe_int_to_str(num_buf, sizeof(num_buf), g_metrics.active_inet_clients);
+                safe_strcat(raport, sizeof(raport), num_buf);
             } else if (strcmp(buf, "report:queue") == 0) {
+                char num_buf[32];
                 pthread_mutex_lock(&g_queue.mutex);
-                sprintf(raport, "Sarcini in coada FIFO: %d / %d", g_queue.count, MAX_QUEUE_JOBS);
+                safe_strcpy(raport, sizeof(raport), "Sarcini in coada FIFO: ");
+                safe_int_to_str(num_buf, sizeof(num_buf), g_queue.count);
+                safe_strcat(raport, sizeof(raport), num_buf);
+                safe_strcat(raport, sizeof(raport), " / ");
+                safe_int_to_str(num_buf, sizeof(num_buf), MAX_QUEUE_JOBS);
+                safe_strcat(raport, sizeof(raport), num_buf);
                 pthread_mutex_unlock(&g_queue.mutex);
             } else if (strcmp(buf, "report:current") == 0) {
-                sprintf(raport, "In executie: %s", (strlen(g_metrics.current_processing_file) > 0) ? g_metrics.current_processing_file : "Nimic");
+                safe_strcpy(raport, sizeof(raport), "In executie: ");
+                if (strlen(g_metrics.current_processing_file) > 0)
+                    safe_strcat(raport, sizeof(raport), g_metrics.current_processing_file);
+                else
+                    safe_strcat(raport, sizeof(raport), "Nimic");
             } else if (strcmp(buf, "report:time") == 0) {
-                double avg = (g_metrics.total_processed_jobs > 0) ? (g_metrics.total_execution_time_ms / g_metrics.total_processed_jobs) : 0;
-                sprintf(raport, "Durata medie: %.2f ms", avg);
+                double avg = (g_metrics.total_processed_jobs > 0) ?
+                             (g_metrics.total_execution_time_ms / g_metrics.total_processed_jobs) : 0;
+                char num_buf[64];
+                safe_strcpy(raport, sizeof(raport), "Durata medie: ");
+                safe_double_to_str(num_buf, sizeof(num_buf), avg, 2);
+                safe_strcat(raport, sizeof(raport), num_buf);
+                safe_strcat(raport, sizeof(raport), " ms");
             } else if (strcmp(buf, "report:history") == 0) {
-                strcpy(raport, "--- Istoric Ultimelor Corectari ---\n");
-                int start = (g_metrics.history_count > MAX_HISTORY_RECORDS) ? g_metrics.history_count - MAX_HISTORY_RECORDS : 0;
+                safe_strcpy(raport, sizeof(raport), "--- Istoric Ultimelor Corectari ---\n");
+                int start = (g_metrics.history_count > MAX_HISTORY_RECORDS) ?
+                            g_metrics.history_count - MAX_HISTORY_RECORDS : 0;
                 for (int i = start; i < g_metrics.history_count; i++) {
-                    strcat(raport, g_metrics.history[i % MAX_HISTORY_RECORDS]);
-                    strcat(raport, "\n");
+                    safe_strcat(raport, sizeof(raport), g_metrics.history[i % MAX_HISTORY_RECORDS]);
+                    safe_strcat(raport, sizeof(raport), "\n");
                 }
             } else if (strcmp(buf, "report:success") == 0) {
-                double r = (g_metrics.total_processed_jobs > 0) ? ((double)g_metrics.total_successful_jobs / g_metrics.total_processed_jobs * 100) : 0;
-                sprintf(raport, "Rata succes: %.2f%% (%d/%d)", r, g_metrics.total_successful_jobs, g_metrics.total_processed_jobs);
+                double r = (g_metrics.total_processed_jobs > 0) ?
+                           ((double)g_metrics.total_successful_jobs / g_metrics.total_processed_jobs * 100) : 0;
+                char num_buf[64];
+                safe_strcpy(raport, sizeof(raport), "Rata succes: ");
+                safe_double_to_str(num_buf, sizeof(num_buf), r, 2);
+                safe_strcat(raport, sizeof(raport), num_buf);
+                safe_strcat(raport, sizeof(raport), "% (");
+                safe_int_to_str(num_buf, sizeof(num_buf), g_metrics.total_successful_jobs);
+                safe_strcat(raport, sizeof(raport), num_buf);
+                safe_strcat(raport, sizeof(raport), "/");
+                safe_int_to_str(num_buf, sizeof(num_buf), g_metrics.total_processed_jobs);
+                safe_strcat(raport, sizeof(raport), num_buf);
+                safe_strcat(raport, sizeof(raport), ")");
             } else {
-                strcpy(raport, "Comanda admin necunoscuta.");
+                safe_strcpy(raport, sizeof(raport), "Comanda admin necunoscuta.");
             }
             pthread_mutex_unlock(&g_metrics.mutex);
-
             (void)send(active_admin_fd, raport, strlen(raport), 0);
         }
     }
-
     safe_close(unix_sock);
     unlink(UNIX_SOCKET_PATH);
     return NULL;
 }
+
 int main(void) {
     init_queue();
     pthread_mutex_init(&g_metrics.mutex, NULL);
@@ -421,6 +519,6 @@ int main(void) {
     pthread_create(&t_i, NULL, inet_thread_func, NULL);
     pthread_create(&t_a, NULL, admin_thread_func, NULL);
 
-    while (g_server_running) { sleep(10); } // NOLINT(concurrency-mt-unsafe)
+    while (g_server_running) { sleep(10); }
     return 0;
 }

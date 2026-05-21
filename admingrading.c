@@ -21,7 +21,6 @@ static const char* UNIX_SOCKET_PATH = "/tmp/omr_admin.sock";
 // Functie de safe close daca mai exista o conexiune
 static void safe_close(int fd) {
     if (fd != INVALID_DESCRIPTOR) {
-        // NOLINTNEXTLINE(concurrency-mt-unsafe)
         if (close(fd) == INVALID_DESCRIPTOR) {
             perror("[WARN] Eroare inchidere descriptor");
         }
@@ -46,10 +45,12 @@ static void afiseaza_meniu_admin(void) {
 // Cerere raport catre server prin socket
 static void cere_raport(int sock, const char* cod_raport) {
     ssize_t sres = send(sock, cod_raport, strlen(cod_raport), 0);
-    if (sres < 0) { perror("[ERR] Trimitere esuata (timeout de inactivitate atins?)"); return; }
+    if (sres < 0) { 
+        perror("[ERR] Trimitere esuata (timeout de inactivitate atins?)"); 
+        return; 
+    }
 
-    char raspuns[DIM_BUFFER * 4];
-    memset(raspuns, 0, sizeof(raspuns));
+    char raspuns[DIM_BUFFER * 4] = {0};
     ssize_t rres = recv(sock, raspuns, sizeof(raspuns) - 1, 0);
     
     if (rres <= 0) {
@@ -61,17 +62,28 @@ static void cere_raport(int sock, const char* cod_raport) {
     printf("\n[RAPORT PRIMIT]\n%s\n", raspuns);
 }
 
-int main(void) {
-// Initializare socket unix in format TCP
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (sock < 0) { perror("[ERR] socket"); return STATUS_FAILURE; }
+// Copiere sigură a unui șir într-un buffer de dimensiune fixă (fără snprintf/strncpy)
+static void copy_string_safe(char *dest, size_t dest_size, const char *src) {
+    size_t i;
+    for (i = 0; i < dest_size - 1 && src[i] != '\0'; ++i) {
+        dest[i] = src[i];
+    }
+    dest[i] = '\0';
+}
 
-// Initializare structura unix pe variabila un_addr
-    struct sockaddr_un un_addr;
-    memset(&un_addr, 0, sizeof(struct sockaddr_un));
-    // Setarea adresa locala a socketului
+int main(void) {
+    // Initializare socket unix in format TCP
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0) { 
+        perror("[ERR] socket"); 
+        return STATUS_FAILURE; 
+    }
+
+    // Initializare structura unix pe variabila un_addr
+    struct sockaddr_un un_addr = {0};
     un_addr.sun_family = AF_UNIX;
-    strncpy(un_addr.sun_path, UNIX_SOCKET_PATH, sizeof(un_addr.sun_path) - 1);
+    // Copiere manuală sigură (înlocuiește strncpy/snprintf)
+    copy_string_safe(un_addr.sun_path, sizeof(un_addr.sun_path), UNIX_SOCKET_PATH);
 
     printf("[AdminApp] Se incearca blocarea exclusiva a serverului pe %s...\n", UNIX_SOCKET_PATH);
     if (connect(sock, (struct sockaddr*)&un_addr, (socklen_t)sizeof(struct sockaddr_un)) < 0) {
@@ -85,7 +97,9 @@ int main(void) {
 
     while (1) {
         afiseaza_meniu_admin();
-        if (fgets(opt, DIM_SELECTIE, stdin) == NULL) { break; }
+        if (fgets(opt, DIM_SELECTIE, stdin) == NULL) { 
+            break; 
+        }
         opt[strcspn(opt, "\n")] = '\0';
 
         if      (strcmp(opt, "1") == 0) { cere_raport(sock, "report:clients"); }
@@ -96,7 +110,9 @@ int main(void) {
         else if (strcmp(opt, "6") == 0) { cere_raport(sock, "report:success"); }
         else if (strcmp(opt, "7") == 0) {
             ssize_t sres = send(sock, "quit", 4, 0);
-            if (sres < 0) { perror("[WARN] send quit"); }
+            if (sres < 0) { 
+                perror("[WARN] send quit"); 
+            }
             printf("[AdminApp] Sesiune incheiata. Control exclusiv eliberat.\n");
             break;
         } else {
@@ -104,5 +120,5 @@ int main(void) {
         }
     }
     safe_close(sock);
-    return STATUS_SUCCESS;
+    return STATUS_SUCCESS; 
 }
