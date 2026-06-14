@@ -1,157 +1,160 @@
-Documentatie Arhitecturala: Grading App
+#  Grading App — Documentație Arhitecturală
 
-1. Introducere
-   Grading App este o aplicatie distribuita de tip Client-Server, dezvoltata in C/C++, inspirata de aplicatii precum ZipGrade. Scopul principal al sistemului este automatizarea procesului de corectare a testelor grila cu ajutorul tehnologiei de detectare a imaginilor (Image Processing / OMR - Optical Mark Recognition) si a programarii concurente.
+[![Language](https://img.shields.io/badge/Language-C%20%2F%20C%2B%2B-00599C?style=flat&logo=c%2B%2B)](https://en.wikipedia.org/wiki/C%2B%2B)
+[![Library](https://img.shields.io/badge/Library-OpenCV-5C3EE8?style=flat&logo=opencv)](https://opencv.org/)
+[![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?style=flat&logo=linux&logoColor=black)](https://www.linux.org/)
 
-Aplicatia primeste fisiere imagine reprezentand foile de raspuns ale studentilor, proceseaza bulele marcate utilizand OpenCV, le compara cu un barem prestabilit si returneaza nota finala. Un element arhitectural central este evaluarea paralelizata: pentru a maximiza performanta, evaluarea fiecarei intrebari din grila are loc intr-un proces separat al sistemului de operare.
+**Grading App** este o aplicație distribuită de tip **Client-Server**, dezvoltată în C/C++ și inspirată de soluții computerizate de procesare a testelor precum *ZipGrade*. Scopul principal al sistemului este automatizarea procesului de corectare a testelor grilă prin tehnologii de recunoaștere optică a marcajelor (**OMR - Optical Mark Recognition**) și utilizarea programării concurente la nivelul sistemului de operare.
 
-2. Arhitectura Sistemului
-   Sistemul este construit pe o arhitectura TCP de tip cerere-raspuns, cuplata cu o punte C++ pentru procesarea imaginilor si un model multi-process pentru evaluare.
+---
 
-2.1. Componentele Arhitecturale
-TCP Client (clientgrading.c): Interfata cu utilizatorul. Preia calea imaginii testului de la utilizator, trimite cererea de evaluare catre server si afiseaza rezultatul primit.
+## 1. Introducere
 
-TCP Server (servergrading.c): Nodul central de procesare. Asteapta conexiuni de la clienti, parseaza cererile si orchestreaza corectarea.
+Aplicația primește fișiere imagine ce reprezintă foile de răspuns completate de studenți, procesează bulele marcate utilizând biblioteca **OpenCV**, le compară cu un barem prestabilit și returnează nota finală. 
 
-OpenCV Bridge (opencv_punte.cpp): Modulul de procesare vizuala. Incarca baremul, aplica filtre pe imagine, gaseste contururile cercurilor si determina care au fost marcate.
+Un element arhitectural central este **evaluarea paralelizată**: pentru a maximiza performanța și a reduce timpul de răspuns, evaluarea fiecărei întrebări din grilă are loc într-un proces separat al sistemului de operare, rulat în paralel.
 
-Sub-sistemul de Concurrency: Serverul foloseste apelul de sistem fork pentru a crea 40 de procese fiu, cate unul pentru fiecare intrebare. Comunicarea rezultatelor de la procesele fiu catre procesul parinte se realizeaza prin Pipes anonime.
+---
 
-2.2. Diagrama de Arhitectura (Fluxul de date)
-Clientul TCP trimite mesajul "grade:cale_imagine" catre Serverul TCP.
+## 2. Arhitectura Sistemului
 
-Serverul TCP apeleaza functia de incarcare din Modulul OpenCV.
+Sistemul este construit pe o arhitectură hibridă de tip **TCP Cerere-Răspuns**, cuplată cu o punte în C++ pentru procesarea de imagini și un model concurent de tip **multi-process** pentru evaluarea propriu-zisă a grilei.
 
-Modulul OpenCV returneaza matricea de raspunsuri in memorie.
+### 2.1. Componentele Arhitecturale
 
-Serverul TCP creeaza 40 de procese fiu.
+* **TCP Client (`clientgrading.c`):** Interfața cu utilizatorul. Preia calea imaginii testului de la utilizator, transmite cererea de evaluare către server și afișează rezultatul final primit.
+* **TCP Server (`servergrading.c`):** Nodul central de procesare. Așteaptă conexiuni de la clienți, parsează cererile sosite în rețea și orchestrează corectarea.
+* **OpenCV Bridge (`opencv_punte.cpp`):** Modulul dedicat procesării vizuale. Încarcă baremul oficial, aplică filtre pe imagine, identifică contururile cercurilor și determină care dintre ele au fost marcate de student.
+* **Sub-sistemul de Concurrency:** Serverul folosește apelul de sistem `fork()` pentru a crea **40 de procese fiu** (câte unul pentru fiecare întrebare din test). Comunicarea rezultatelor de la procesele fiu înapoi către procesul părinte se realizează prin **Pipes anonime**.
 
-Fiecare Proces Fiu interogheaza Modulul OpenCV pentru intrebarea sa si scrie 1 (corect) sau 0 (gresit) in Pipe.
+### 2.2. Fluxul de Date
 
-Serverul TCP citeste din Pipes, aduna rezultatele si calculeaza nota.
+1. Clientul TCP trimite mesajul `grade:cale_imagine` către Serverul TCP.
+2. Serverul TCP apelează funcția de încărcare din Modulul OpenCV.
+3. Modulul OpenCV returnează matricea de răspunsuri în memorie.
+4. Serverul TCP creează 40 de procese fiu folosind apeluri succesive `fork()`.
+5. Fiecare Proces Fiu interoghează Modulul OpenCV pentru întrebarea sa specifică și scrie `1` (corect) sau `0` (greșit) în Pipe-ul alocat.
+6. Serverul TCP (Părintele) citește din toate cele 40 de Pipes, adună rezultatele și calculeaza nota finală.
+7. Serverul TCP trimite nota finală înapoi la Clientul TCP.
 
-Serverul TCP trimite nota finala inapoi la Clientul TCP.
+---
 
-3. Structura Mesajelor
-   Comunicarea se face prin pachete de text brut peste protocolul TCP. Dimensiunea maxima a bufferului este de 4096 bytes.
+## 3. Structura Mesajelor
 
-3.1 Cereri (Client catre Server)
-Cerere de Evaluare:
-Format: grade:cale_absoluta_sau_relativa_imagine
-Descriere: Instruieste serverul sa corecteze imaginea specificata.
+Comunicarea se realizează prin pachete de text brut transmise peste protocolul TCP. Dimensiunea maximă a bufferului de rețea este de **4096 bytes**.
 
-Cerere de Iesire:
-Format: quit
-Descriere: Inchide conexiunea cu serverul in siguranta.
+### 3.1 Cereri (Client ➔ Server)
 
-3.2 Raspunsuri (Server catre Client)
-Raspuns de Succes:
-Format: Nota: X.Y / 10
+* **Cerere de Evaluare:**
+    * **Format:** `grade:cale_absoluta_sau_relativa_imagine`
+    * **Descriere:** Instruiește serverul să corecteze imaginea specificată de la calea transmisă.
+* **Cerere de Ieșire:**
+    * **Format:** `quit`
+    * **Descriere:** Închide conexiunea cu serverul în condiții de siguranță.
 
-Eroare Imagine:
-Format: Eroare: Imaginea nu a putut fi procesata!
+### 3.2 Răspunsuri (Server ➔ Client)
 
-Eroare Sintaxa:
-Format: Comenzi valide: grade:cale_imagine | quit
+| Tip Răspuns | Format / Structură |
+| :--- | :--- |
+| **Răspuns de Succes** | `Nota: X.Y / 10` |
+| **Eroare Imagine** | `Eroare: Imaginea nu a putut fi procesata!` |
+| **Eroare Sintaxă** | `Comenzi valide: grade:cale_imagine \| quit` |
+| **Deconectare** | `La revedere!` |
 
-Deconectare:
-Format: La revedere!
+---
 
-4. Specificatii API
-   Protocol: TCP pe Port 9090
-   Format: Text brut / null-terminated
+## 4. Specificații API & Date Interne
 
-Actiunea: Corectare Grila
-Structura conceptuala a cererii (Request Payload):
+* **Protocol:** TCP pe Portul `9090`
+* **Format date:** Text brut (Null-terminated / `\0`)
 
-command: "grade"
+### Structura Conceptuală Payload
 
-delimiter: ":"
+#### Cerere (Request):
+* `command`: `"grade"`
+* `delimiter`: `":"`
+* `payload`: calea imaginii localizată pe server
 
-payload: calea imaginii pe server
+#### Răspuns (Response):
+* `prefix`: `"Nota: "`
+* `grade`: valoare numerică între `0.0` și `10.0`
+* `suffix`: `" / 10"`
 
-Structura conceptuala a raspunsului (Response Payload):
+### Structura Datelor Interne
+* `raspunsuri_student`: Array cu 40 de elemente populat de OpenCV care conține opțiunile detectate în urma analizării bulelor (`0=A`, `1=B`, `2=C`, `3=D`, `-1=Gol/Eroare`).
+* `barem_corect`: Array cu 40 de elemente populat la pornire prin citirea fișierului `barem.txt`.
 
-prefix: "Nota: "
+### Extensibilitate Viitoare
+1.  **Multiple Choice Support:** Adaptarea modulului OpenCV pentru a stoca un vector de biți per rând în loc de o singură valoare, permițând bifarea mai multor răspunsuri per întrebare.
+2.  **Reports (Class Summary):** Implementarea unui nou mesaj API, prin care procesul părinte agregă notele salvate pe disc ale tuturor studenților dintr-o clasă și calculează statistici (medie, promovabilitate).
 
-grade: valoare numerica intre 0.0 si 10.0
+---
 
-suffix: " / 10"
+## 5. Tehnologii și Biblioteci Utilizate
 
-Structura Datelor Interne
-raspunsuri_student: Array cu 40 de elemente populat de OpenCV care contine optiunile detectate (0=A, 1=B, 2=C, 3=D, -1=Gol/Eroare).
+### Limbaje de Programare
+* **C:** Folosit pentru logica de rețea (TCP sockets), managementul proceselor (`fork`, `waitpid`) și comunicarea inter-procese (`pipes`). Fișierele `clientgrading.c` și `servergrading.c` sunt scrise în C pur.
+* **C++:** Folosit exclusiv pentru modulul de procesare a imaginilor (`opencv_punte.cpp`), deoarece biblioteca OpenCV oferă o interfață nativă mult mai robusta și optimizată în C++.
 
-barem_corect: Array cu 40 de elemente populat din fisierul barem.txt.
+### Biblioteci și API-uri
+* **OpenCV (Open Source Computer Vision Library):** Baza procesării vizuale. Se folosesc funcții pentru citirea imaginii (`imread`), conversia în grayscale (`cvtColor`), filtrare (`GaussianBlur`), binarizare (`adaptiveThreshold`) și detecția contururilor (`findContours`).
+* **POSIX API / Standard C Library:**
+    * `<sys/socket.h>`, `<netinet/in.h>`, `<arpa/inet.h>`: Pentru implementarea comunicării în rețea prin socket-uri TCP.
+    * `<unistd.h>`, `<sys/wait.h>`: Pentru crearea proceselor paralele (`fork`), sincronizare (`waitpid`) și canale de comunicare (`pipe`).
+    * `<stdio.h>`, `<stdlib.h>`, `<string.h>`: Pentru operații standard I/O și manipularea memoriei.
+* **Standard Template Library (STL) din C++:** Se utilizează structurile `std::vector`, `std::string`, `std::fstream` și header-ul `<algorithm>` (pentru sortarea bulelor detectate în foaia de răspuns).
 
-Extensibilitate Viitoare
-Multiple Choice Support: Adaptarea modulului OpenCV pentru a stoca un vector de biti per rand in loc de o singura valoare, permitand bifarea mai multor raspunsuri.
+---
 
-Reports (Class Summary): Implementarea unui nou mesaj API, prin care procesul parinte agrega notele salvate pe disc ale tuturor studentilor dintr-o clasa si calculeaza statistici.
+## 6. Descrierea Codului Sursa
 
-5. Tehnologii si Biblioteci Utilizate
-   Limbaje de Programare
-   C: Folosit pentru logica de retea (TCP sockets), managementul proceselor (fork, waitpid) si comunicarea inter-procese (pipes). Fisierele clientgrading.c si servergrading.c sunt scrise in C pur.
+### Clientul (`clientgrading.c`)
+Acesta este punctul de interacțiune cu utilizatorul. Inițializează un socket TCP și se conectează la adresa IP și portul serverului. Rulează o buclă infinită în care afișează un meniu simplu. Când utilizatorul introduce calea către o imagine, clientul împachetează acest text și îl trimite serverului, blocându-se apoi (prin `recv`) până când primește nota finală sau un mesaj de eroare.
 
-C++: Folosit exclusiv pentru modulul de procesare a imaginilor (opencv_punte.cpp), deoarece biblioteca OpenCV ofera o interfata nativa si mult mai robusta in C++.
+### Serverul (`servergrading.c`)
+Este inima aplicației. Rulează în mod continuu (daemon/loop), așteptând conexiuni de la clienți prin intermediul funcțiilor standard `bind`, `listen` și `accept`. Când primește o cerere de corectare, apelează întâi puntea OpenCV pentru a extrage răspunsurile din imagine.
 
-Biblioteci si API-uri
-OpenCV (Open Source Computer Vision Library): Baza procesarii vizuale. Se folosesc functii pentru citirea imaginii (imread), conversia in alb-negru (cvtColor), filtrare (GaussianBlur), binarizare (adaptiveThreshold) si detectia contururilor (findContours).
+Partea centrală de programare concurentă are loc aici: serverul creează un array de pipe-uri și apelează funcția `fork()` de 40 de ori (corespunzător celor 40 de întrebări). Fiecare proces fiu primește un ID de întrebare, verifică prin funcția C++ dacă răspunsul studentului se potrivește cu cel din barem și scrie rezultatul binar (`1` sau `0`) în pipe-ul său, după care execută `exit()`. Procesul părinte colectează asincron datele din toate pipe-urile, așteaptă terminarea tuturor fiilor cu `waitpid`, calculează nota finală și trimite rezultatul înapoi clientului sub formă de text formatat.
 
-POSIX API / Standard C Library:
+### Puntea OpenCV (`opencv_punte.cpp`)
+Acest fișier face legătura între codul C al serverului și biblioteca C++ OpenCV, expunând funcțiile prin directiva `extern "C"` pentru a putea fi link-ate și apelate direct din `servergrading.c`.
 
-sys/socket.h, netinet/in.h, arpa/inet.h: Pentru implementarea comunicarii in retea (TCP).
+Funcția principală citește întâi fișierul `barem.txt`. Apoi, încarcă imaginea testului în memorie, îi aplică o redimensionare (`resize`) și o serie de filtre: o transformă în format grayscale, aplică un Gaussian blur pentru netezire și un Adaptive Threshold pentru binarizare (alb-negru complet), scoțând în evidență zonele completate cu cerneală. Imaginea este apoi tăiată matematic în două jumătăți (coloana stângă și coloana dreaptă).
 
-unistd.h, sys/wait.h: Pentru crearea proceselor paralele (fork), sincronizare (waitpid) si comunicare (pipe).
+Pentru fiecare coloană se caută contururi circulare. Se filtrează doar contururile care au formă apropiată de un cerc și o anumită plajă de dimensiuni. Aceste contururi sunt sortate întâi pe axa Y (pe rânduri) și apoi pe axa X (opțiunile A, B, C, D). Pentru fiecare set de 4 bule, programul izolează interiorul fiecăreia, numără pixelii negri (reprezentând marcajul) și alege bula cu cei mai mulți pixeli completați ca fiind răspunsul ales de student. Acest răspuns este salvat în array-ul global accesat ulterior de procesele fiu din server.
 
-stdio.h, stdlib.h, string.h: Pentru operatii standard de intrare/iesire si manipularea memoriei.
+---
 
-Standard Template Library (STL) din C++: Se utilizeaza vector, string, fstream si algorithm (pentru sortarea bulelor detectate in imagine).
+## 7. Compilare și Rulare
 
-6. Descrierea Codului Sursa
-   Proiectul este impartit in trei componente logice majore, fiecare avand un rol bine definit:
+Deoarece proiectul combină cod scris în C și C++, procesul de compilare pentru server se realizează în mai multe etape (compilare separată a modulelor în fișiere obiect `.o`, urmată de faza de linking).
 
-Clientul (clientgrading.c)
-Acesta este punctul de interactiune cu utilizatorul. Initializeaza un socket TCP si se conecteaza la adresa IP si portul serverului. Ruleaza o bucla infinita in care afiseaza un meniu simplu. Cand utilizatorul introduce calea catre o imagine, clientul impacheteaza acest text si il trimite serverului, blocandu-se apoi pana cand primeste nota finala sau un mesaj de eroare.
-
-Serverul (servergrading.c)
-Este inima aplicatiei. Ruleaza in mod continuu, asteptand conexiuni de la clienti prin intermediul functiilor bind, listen si accept. Cand primeste o cerere de corectare, apeleaza intai puntea OpenCV pentru a extrage raspunsurile din imagine.
-
-Partea centrala de programare concurenta are loc aici: serverul creeaza un array de pipe-uri si apeleaza functia fork de 40 de ori (corespunzator celor 40 de intrebari). Fiecare proces fiu primeste un ID de intrebare, verifica prin functia C++ daca raspunsul studentului se potriveste cu baremul si scrie rezultatul (1 sau 0) in pipe-ul sau, dupa care executa exit. Procesul parinte citeste din toate pipe-urile, asteapta terminarea fiilor cu waitpid, calculeaza nota finala si trimite rezultatul inapoi clientului sub forma de text formatat manual.
-
-Puntea OpenCV (opencv_punte.cpp)
-Acest fisier face legatura intre codul C al serverului si biblioteca C++ OpenCV, expunand functiile prin directiva extern "C" pentru a putea fi apelate direct din servergrading.c.
-
-Functia principala citeste intai fisierul barem.txt. Apoi, incarca imaginea testului in memorie, ii aplica un resize si o serie de filtre: o transforma in format grayscale, aplica un Gaussian blur pentru netezire si un Adaptive Threshold pentru a o transforma in alb-negru (binarizare), scotand in evidenta cerneala cu care a scris studentul. Imaginea este apoi taiata matematic in doua jumatati (coloana stanga si coloana dreapta).
-
-Pentru fiecare coloana se cauta contururi. Se filtreaza doar contururile care au forma apropiata de un cerc si o anumita latime/inaltime. Aceste contururi sunt sortate intai pe axa Y (pe randuri) si apoi pe axa X (optiunile A, B, C, D). Pentru fiecare set de 4 bule, programul izoleaza interiorul fiecareia, numara pixelii care reprezinta marcajul si alege bula cu cei mai multi pixeli completati ca fiind raspunsul ales de student. Acest raspuns este salvat intr-un array global accesat ulterior de procesele fiu din server.
-
-7. Compilare si Rulare
-   Deoarece proiectul combina cod C si C++, procesul de compilare pentru server se realizeaza in mai multe etape. Fisierele sursa sunt intai transformate in fisiere obiect (.o), dupa care sunt legate intr-un singur executabil, adaugand referintele catre bibliotecile externe.
-
-Dependente
-
+### Dependențe (Ubuntu/Debian)
+```bash
 sudo apt-get update
-
 sudo apt-get install -y gcc g++ libopencv-dev pkg-config
-
-Compilare
-
+Compilare Surse
+Bash
+# 1. Compilarea serverului în fișier obiect
 gcc -c servergrading.c -o servergrading.o
 
+# 2. Compilarea punții OpenCV în fișier obiect (cu flag-urile OpenCV necesare)
 g++ -c opencv_punte.cpp -o opencv_punte.o $(pkg-config --cflags opencv4)
 
+# 3. Legarea (Linking) obiectelor într-un singur executabil final pentru Server
 g++ servergrading.o opencv_punte.o -o server_grading $(pkg-config --libs opencv4)
 
+# 4. Compilarea executabilului pentru Client
 gcc clientgrading.c -o client_grading
+Ghid de Execuție
+Pasul 1: Pornirea Serverului (Terminal 1)
 
-Pornirea procesului principal (Terminal 1):
+Bash
+./server_grading
+Serverul va afișa un mesaj de confirmare a pornirii pe portul 9090 și va intra în starea de așteptare pasivă (listen).
 
-./server
+Pasul 2: Pornirea Interfeței Client (Terminal 2)
 
-Serverul va afisa un mesaj de confirmare a pornirii pe portul specificat si va intra in starea de asteptare.
-
-Pornirea interfetei client (Terminal 2):
-
-./client
-
-Dupa conectare, clientul va afisa meniul interactiv. Tastati cifra corespunzatoare actiunii dorite, apasati Enter, iar apoi introduceti calea catre fisierul imagine pentru a declansa procesul de corectare descris in capitolele anterioare.
+Bash
+./client_grading
+După conectarea cu succes, clientul va afișa meniul interactiv. Tastați cifra corespunzătoare acțiunii dorite, apăsați Enter, iar apoi introduceți calea către fișierul imagine (ex: imagini/test_student.png) pentru a declanșa procesul automat de corectare.
