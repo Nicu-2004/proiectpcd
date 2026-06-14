@@ -11,10 +11,11 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-// Headerul aplicatiei noastre pentru organizarea chunk-urilor TCP
+// Headerul trimis la server
 typedef struct {
-    char magic[4];      // Identificator de protocol: "OMR\0" 
-    uint32_t file_size; // Marimea fisierului in octeti
+    char magic[4];
+    uint32_t file_size;
+    char barem[40]; 
 } app_header_t;
 
 enum ConfigClient {
@@ -25,98 +26,160 @@ enum ConfigClient {
     STATUS_FAILURE     = 1
 };
 
-// Functie de safeclose
-static void safe_close(int fd) {
-    if (fd != INVALID_DESCRIPTOR) {
-        // NOLINTNEXTLINE(concurrency-mt-unsafe)
-        if (close(fd) == INVALID_DESCRIPTOR) {
-            perror("[WARN] Eroare inchidere descriptor");
+void elimina_newline(char* str) {
+    str[strcspn(str, "\r\n")] = '\0';
+}
+
+// Citirea fisierului de barem
+int incarca_barem_din_fisier(const char* cale_fisier, char* barem_out) {
+    FILE* f = fopen(cale_fisier, "r");
+    if (!f) return -1;
+    char linie[64];
+    int gasite = 0;
+    while (fgets(linie, sizeof(linie), f)) {
+        int nr_intrebare;
+        char raspuns_corect;
+        if (sscanf(linie, "%d: %c", &nr_intrebare, &raspuns_corect) == 2) {
+            if (nr_intrebare >= 1 && nr_intrebare <= 40) {
+                barem_out[nr_intrebare - 1] = raspuns_corect;
+                gasite++;
+            }
         }
     }
+    fclose(f);
+    return (gasite == 40) ? 0 : -1;
 }
 
 int main(void) {
-    // Afisam mesaj la inceput
+    char cale_barem[DIM_BUFFER];
     char cale_fisier[DIM_BUFFER];
-    printf("Introdu calea imaginii OMR pentru corectare (ex: photo.png): ");
-    fflush(stdout);
+    char nume_iesire[DIM_BUFFER];
+    char barem_memorie[40];
+    char optiune[10];
 
-    // Preluarea mesajului de la tastatura si transformand \n in \0
-    if (fgets(cale_fisier, DIM_BUFFER, stdin) == NULL) { return STATUS_FAILURE; }
-    cale_fisier[strcspn(cale_fisier, "\n")] = '\0';
+    printf("===========================================\n");
+    printf("      SISTEM OMR - CLIENT EVALUARE\n");
+    printf("===========================================\n");
 
-    // Setare file descriptor al fisierului si afisare eroare daca nu sa putut deschide fisierul
-    int file_fd = open(cale_fisier, O_RDONLY);
-    if (file_fd < 0) {
-        perror("[ERR] Nu am putut deschide fisierul specificat");
-        return STATUS_FAILURE;
+    while (1) {
+        printf("\n--- MENIU PRINCIPAL ---\n");
+        printf("1. Evalueaza poza (Trimitere test catre server)\n");
+        printf("0. Anuleaza aplicatia (Iesire)\n");
+        printf("-- Alege o optiune: ");
+        fflush(stdout);
+
+        if (fgets(optiune, sizeof(optiune), stdin) == NULL) break;
+        elimina_newline(optiune);
+
+        if (strcmp(optiune, "0") == 0) {
+            printf("[Client] Aplicatie anulata / oprita cu succes.\n");
+            break;
+        } else if (strcmp(optiune, "1") == 0) {
+            // 1. CERE BAREMUL
+            printf("\nIntrodu calea catre fisierul barem (ex: barem.txt): ");
+            fflush(stdout);
+            if (fgets(cale_barem, DIM_BUFFER, stdin) == NULL) break;
+            elimina_newline(cale_barem);
+
+            if (incarca_barem_din_fisier(cale_barem, barem_memorie) < 0) {
+                printf("[ERR] Fisierul '%s' nu exista sau nu contine 40 de raspunsuri valide!\n", cale_barem);
+                continue;
+            }
+
+            // 2. CERE POZA NECORECTATĂ
+            printf("Introdu calea imaginii OMR (ex: photo.png): ");
+            fflush(stdout);
+            if (fgets(cale_fisier, DIM_BUFFER, stdin) == NULL) break;
+            elimina_newline(cale_fisier);
+
+            int file_fd = open(cale_fisier, O_RDONLY);
+            if (file_fd < 0) {
+                printf("[ERR] Nu am putut gasi imaginea '%s'.\n", cale_fisier);
+                continue;
+            }
+
+            struct stat stat_buf;
+            if (fstat(file_fd, &stat_buf) < 0) {
+                perror("[ERR] Eroare citire dimensiune imagine");
+                close(file_fd); continue;
+            }
+
+            // 3. CERE NUMELE REZULTATULUI
+            printf("Introdu numele pentru poza corectata care se va salva (ex: rez_popescu.png): ");
+            fflush(stdout);
+            if (fgets(nume_iesire, DIM_BUFFER, stdin) == NULL) { close(file_fd); break; }
+            elimina_newline(nume_iesire);
+
+            // Incepe comunicarea cu serverul
+            int sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock < 0) { perror("[ERR] socket"); close(file_fd); continue; }
+
+            struct sockaddr_in srv_addr;
+            memset(&srv_addr, 0, sizeof(srv_addr));
+            srv_addr.sin_family = AF_INET;
+            srv_addr.sin_port   = htons(PORT_SERVER);
+            inet_pton(AF_INET, "127.0.0.1", &srv_addr.sin_addr);
+
+            printf("[Client] Ma conectez la serverul 127.0.0.1:%d...\n", PORT_SERVER);
+            if (connect(sock, (struct sockaddr*)&srv_addr, sizeof(srv_addr)) < 0) {
+                perror("[ERR] Conexiune esuata. Verifica daca serverul este pornit.");
+                close(sock); close(file_fd); continue;
+            }
+
+            // Pregătirea pachetului care va fi trimis spre server
+            app_header_t header;
+            strncpy(header.magic, "OMR", 4);
+            header.file_size = htonl((uint32_t)stat_buf.st_size);
+            memcpy(header.barem, barem_memorie, 40); 
+
+            printf("[Client] Trimit pachetul (Barem + Imagine %u octeti)...\n", (unsigned int)stat_buf.st_size);
+            send(sock, &header, sizeof(app_header_t), 0);
+            
+            off_t offset = 0;
+            sendfile(sock, file_fd, &offset, (size_t)stat_buf.st_size);
+            close(file_fd);
+
+            printf("[Client] Fisier trimis complet! Astept sincron corectarea de la server...\n");
+
+            //Primirea rezultatelor
+            char raspuns_text[256];
+            memset(raspuns_text, 0, 256);
+            ssize_t rres = recv(sock, raspuns_text, 256, MSG_WAITALL);
+            
+            if (rres <= 0) {
+                printf("[ERR] Serverul a inchis conexiunea neasteptat.\n");
+            } else {
+                raspuns_text[255] = '\0';
+                printf("\n========================================\n");
+                printf("[REZULTAT PRIMIT] %s\n", raspuns_text);
+                printf("========================================\n");
+
+                uint32_t net_size = 0;
+                if (recv(sock, &net_size, sizeof(net_size), MSG_WAITALL) == sizeof(net_size)) {
+                    uint32_t image_size = ntohl(net_size);
+                    if (image_size > 0) {
+                        printf("[Client] Primesc dovada de corectare (%u octeti)...\n", image_size);
+                        int out_fd = open(nume_iesire, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+                        if (out_fd >= 0) {
+                            uint32_t ramasi = image_size;
+                            char buf[DIM_BUFFER];
+                            while (ramasi > 0) {
+                                size_t de_citit = (ramasi > DIM_BUFFER) ? DIM_BUFFER : ramasi;
+                                ssize_t cititi = recv(sock, buf, de_citit, 0);
+                                if (cititi <= 0) break;
+                                write(out_fd, buf, cititi);
+                                ramasi -= cititi;
+                            }
+                            close(out_fd);
+                            printf("[Client] Poza a fost salvata sub numele '%s'!\n", nume_iesire);
+                        }
+                    }
+                }
+            }
+            close(sock);
+        } else {
+            printf("[Client] Optiune invalida. Incearca din nou.\n");
+        }
     }
-
-    // Salvarea in stat_buf datele fisierului in format stat
-    struct stat stat_buf;
-    if (fstat(file_fd, &stat_buf) < 0) {
-        perror("[ERR] Eroare la citirea dimensiunii fisierului");
-        safe_close(file_fd);
-        return STATUS_FAILURE;
-    }
-
-    // Creare socket INET cu format TCP
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) { perror("[ERR] socket"); safe_close(file_fd); return STATUS_FAILURE; }
-
-    // Setare adresa si port, htons pentru format standard short
-    struct sockaddr_in srv_addr;
-    memset(&srv_addr, 0, sizeof(struct sockaddr_in));
-    srv_addr.sin_family = AF_INET;
-    srv_addr.sin_port   = htons(PORT_SERVER);
-    if (inet_pton(AF_INET, "127.0.0.1", &srv_addr.sin_addr) <= 0) {
-        perror("[ERR] inet_pton"); safe_close(sock); safe_close(file_fd); return STATUS_FAILURE;
-    }
-
-    // 3 way handshake intre client si server
-    printf("[Client] Ma conectez la serverul %s:%d...\n", "127.0.0.1", PORT_SERVER);
-    if (connect(sock, (struct sockaddr*)&srv_addr, (socklen_t)sizeof(srv_addr)) < 0) {
-        perror("[ERR] Conexiune esuata"); safe_close(sock); safe_close(file_fd); return STATUS_FAILURE;
-    }
-
-    // Definim si trimitem HEADER-UL aplicatiei, htonl  pentru format standard long
-    app_header_t header;
-    strncpy(header.magic, "OMR", 4);
-    header.file_size = htonl((uint32_t)stat_buf.st_size); 
-
-    // Trimitere header spre server
-    printf("[Client] Trimit Header: %u octeti pregatiti...\n", (unsigned int)stat_buf.st_size);
-    if (send(sock, &header, sizeof(app_header_t), 0) < 0) {
-        perror("[ERR] Eroare trimitere header"); safe_close(sock); safe_close(file_fd); return STATUS_FAILURE;
-    }
-
-    // Trimitem fisierul serverului
-    printf("[Client] Trimit continutul binar (zero-copy sendfile)...\n");
-    off_t offset = 0;
-    ssize_t trimisi = sendfile(sock, file_fd, &offset, (size_t)stat_buf.st_size);
-    
-    if (trimisi != (ssize_t)stat_buf.st_size) {
-        perror("[ERR] Eroare la transferul sendfile"); safe_close(sock); safe_close(file_fd); return STATUS_FAILURE;
-    }
-    safe_close(file_fd); // Fisierul sursa nu mai e necesar
-
-    // Raspunsul de la server cu raspunsul folosind comanda recv
-    printf("[Client] Fisier trimis complet! Astept sincron corectarea de la server...\n");
-    char raspuns[DIM_BUFFER];
-    memset(raspuns, 0, DIM_BUFFER) 
-
-    ssize_t rres = recv(sock, raspuns, DIM_BUFFER - 1, 0);
-    if (rres <= 0) {
-        printf("[ERR] Serverul a inchis conexiunea neasteptat.\n");
-    } else {
-        raspuns[rres] = '\0';
-        printf("\n========================================\n");
-        printf("[REZULTAT PRIMIT] %s\n", raspuns);
-        printf("========================================\n");
-    }
-
-    // Inchidem socketul cand am terminat
-    safe_close(sock);
-    printf("[Client] Interactiune incheiata cu succes. Socket inchis.\n");
     return STATUS_SUCCESS;
 }

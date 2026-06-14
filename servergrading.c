@@ -15,13 +15,16 @@
 #include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/inotify.h>
 
-// Headerul aplicatiei mapat identic ca in client 
+// Protocolul de retea 
 typedef struct {
     char magic[4];
     uint32_t file_size;
+    char barem[40]; 
 } app_header_t;
 
+// Configuratiile serverului in format enum
 enum ConfigServer {
     PORT_INET            = 9090,
     MAX_CLIENTS_POLL     = 64,
@@ -37,19 +40,23 @@ enum ConfigServer {
     STATUS_FAILURE       = 1
 };
 
-// socket unix pentru conexiunea cu adminul
-static const float FACTOR_ZECIMALA = 10.0F;
 static const char* UNIX_SOCKET_PATH = "/tmp/omr_admin.sock";
 
-extern int incarca_imagine_opencv(const char* cale);
-extern int proceseaza_intrebare_opencv(int nr_intrebare);
+// Conexiunea cu libraria OpenCV in loc de #include
+struct Mat_t;
+extern struct Mat_t* incarca_imagine_opencv(const char* cale_fisier);
+extern int proceseaza_intrebare_opencv(struct Mat_t* imagine, int index_intrebare, char raspuns_corect);
+extern void pCvMatDelete(struct Mat_t* wrapper); 
 
+// Informatii job 
 typedef struct {
     unsigned int job_id;
     char file_path[BUFFER_CAPACITY];
     int client_socket_fd;
+    char barem_asociat[40];
 } omr_job_t;
 
+// Coada FIFO cu head/tail
 typedef struct {
     omr_job_t jobs[MAX_QUEUE_JOBS];
     int head;
@@ -60,6 +67,7 @@ typedef struct {
     pthread_cond_t cond;
 } job_queue_t;
 
+// Informatii 
 typedef struct {
     int active_inet_clients;
     int total_processed_jobs;
@@ -75,13 +83,6 @@ static job_queue_t      g_queue;
 static server_metrics_t g_metrics;
 static volatile sig_atomic_t g_server_running = 1;
 
-static void safe_close(int fd) {
-    if (fd != INVALID_DESCRIPTOR) {
-        // NOLINTNEXTLINE(concurrency-mt-unsafe)
-        if (close(fd) == INVALID_DESCRIPTOR) { perror("[WARN] Eroare close"); }
-    }
-}
-
 static void adauga_in_istoric(const char* inreg) {
     pthread_mutex_lock(&g_metrics.mutex);
     int idx = g_metrics.history_count % MAX_HISTORY_RECORDS;
@@ -91,7 +92,7 @@ static void adauga_in_istoric(const char* inreg) {
     pthread_mutex_unlock(&g_metrics.mutex);
 }
 
-
+// Initializare coada FIFO
 static void init_queue(void) {
     memset(&g_queue, 0, sizeof(job_queue_t));
     g_queue.next_job_id = 100;
@@ -99,13 +100,13 @@ static void init_queue(void) {
     pthread_cond_init(&g_queue.cond, NULL);
 }
 
-static void enqueue_job(const char* cale, int clt_fd) {
+// Adaugare sarcina in FIFO
+static void enqueue_job(const char* cale, int clt_fd, const char* barem_primit) {
     pthread_mutex_lock(&g_queue.mutex);
     if (g_queue.count >= MAX_QUEUE_JOBS) {
-        // Daca coada e plina, respingem pe loc
         char *err = "ERR: Coada serverului este plina!";
-        (void)send(clt_fd, err, strlen(err), 0);
-        safe_close(clt_fd);
+        send(clt_fd, err, strlen(err), 0);
+        if (clt_fd != INVALID_DESCRIPTOR) close(clt_fd);
         pthread_mutex_unlock(&g_queue.mutex);
         return;
     }
@@ -113,8 +114,8 @@ static void enqueue_job(const char* cale, int clt_fd) {
     int t_idx = g_queue.tail;
     g_queue.jobs[t_idx].job_id = g_queue.next_job_id++;
     strncpy(g_queue.jobs[t_idx].file_path, cale, BUFFER_CAPACITY - 1);
-    g_queue.jobs[t_idx].file_path[BUFFER_CAPACITY - 1] = '\0';
     g_queue.jobs[t_idx].client_socket_fd = clt_fd;
+    memcpy(g_queue.jobs[t_idx].barem_asociat, barem_primit, 40);
 
     g_queue.tail = (g_queue.tail + 1) % MAX_QUEUE_JOBS;
     g_queue.count++;
@@ -123,21 +124,27 @@ static void enqueue_job(const char* cale, int clt_fd) {
     pthread_mutex_unlock(&g_queue.mutex);
 }
 
-
-static float executa_evaluare_test(const char *cale_imagine) {
-    if (incarca_imagine_opencv(cale_imagine) == 0) { return -1.0F; }
+// Evaluarea pozei folosind OpenCV pentru fiecare intrebare
+static float executa_evaluare_test(const char *cale_imagine, const char* barem_dinamic) {
+    struct Mat_t* imagine = incarca_imagine_opencv(cale_imagine);
+    if (imagine == NULL) return -1.0F; 
     
     int total_corecte = 0;
-    for (int contor = 1; contor <= NR_INTREBARI_TEST; contor++) {
-        total_corecte += proceseaza_intrebare_opencv(contor);
+    for (int i = 0; i < NR_INTREBARI_TEST; i++) {
+        total_corecte += proceseaza_intrebare_opencv(imagine, i, barem_dinamic[i]);
     }
+    
+    pCvMatDelete(imagine);
     return ((float)total_corecte / (float)NR_INTREBARI_TEST) * 10.0F;
 }
 
+// Worker thread
 static void* worker_thread_func(void* arg) {
     (void)arg;
     struct timespec start_t, end_t;
-    char raspuns[BUFFER_CAPACITY];
+    char raspuns[256];
+    char path_copie[BUFFER_CAPACITY];
+    char barem_copie[40];
 
     while (g_server_running) {
         pthread_mutex_lock(&g_queue.mutex);
@@ -147,12 +154,10 @@ static void* worker_thread_func(void* arg) {
         if (!g_server_running) { pthread_mutex_unlock(&g_queue.mutex); break; }
 
         int cur_idx = g_queue.head;
-        char path_copie[BUFFER_CAPACITY];
         strncpy(path_copie, g_queue.jobs[cur_idx].file_path, BUFFER_CAPACITY - 1);
-        path_copie[BUFFER_CAPACITY - 1] = '\0';
-        
         int clt_sock = g_queue.jobs[cur_idx].client_socket_fd;
         unsigned int jid = g_queue.jobs[cur_idx].job_id;
+        memcpy(barem_copie, g_queue.jobs[cur_idx].barem_asociat, 40);
 
         g_queue.head = (g_queue.head + 1) % MAX_QUEUE_JOBS;
         g_queue.count--;
@@ -162,41 +167,59 @@ static void* worker_thread_func(void* arg) {
         strncpy(g_metrics.current_processing_file, path_copie, BUFFER_CAPACITY - 1);
         pthread_mutex_unlock(&g_metrics.mutex);
 
-        
         clock_gettime(CLOCK_MONOTONIC, &start_t);
-        float nota = executa_evaluare_test(path_copie);
+
+        float nota = executa_evaluare_test(path_copie, barem_copie);
         clock_gettime(CLOCK_MONOTONIC, &end_t);
-        
-        double d_ms = (double)(end_t.tv_sec - start_t.tv_sec) * 1000.0 + 
+
+        double d_ms = (double)(end_t.tv_sec - start_t.tv_sec) * 1000.0 +
                       (double)(end_t.tv_nsec - start_t.tv_nsec) / 1000000.0;
 
-        
-        memset(raspuns, 0, BUFFER_CAPACITY);
+        memset(raspuns, 0, 256);
         if (nota < 0.0F) {
-            strncpy(raspuns, "Eroare: Imaginea nu a putut fi procesata optic.", BUFFER_CAPACITY - 1);
+            snprintf(raspuns, 256, "Eroare: Imaginea nu a putut fi procesata optic.");
         } else {
-            int p_int = (int)nota;
-            int zec   = (int)((nota - (float)p_int) * FACTOR_ZECIMALA);
-            // NOLINTNEXTLINE(stdio-snprintf, security-snprintf)
-            snprintf(raspuns, BUFFER_CAPACITY, "Succes! Nota acordata: %d.%d / 10", p_int, zec);
+            snprintf(raspuns, 256, "Succes! Nota acordata: %.2f / 10", nota);
         }
 
         if (clt_sock != INVALID_DESCRIPTOR) {
-            (void)send(clt_sock, raspuns, strlen(raspuns), 0);
-            safe_close(clt_sock);
+            char text_buffer[256];
+            memset(text_buffer, 0, 256);
+            strncpy(text_buffer, raspuns, 255);
+            send(clt_sock, text_buffer, 256, 0);
+
+            int img_fd = open("/tmp/debug_calibrare.png", O_RDONLY);
+            uint32_t file_size = 0;
+            struct stat st;
+            
+            if (img_fd >= 0 && fstat(img_fd, &st) == 0) {
+                file_size = st.st_size;
+            }
+
+            uint32_t net_size = htonl(file_size);
+            send(clt_sock, &net_size, sizeof(net_size), 0);
+
+            if (file_size > 0) {
+                char buf[BUFFER_CAPACITY];
+                ssize_t bytes_cititi;
+                while ((bytes_cititi = read(img_fd, buf, BUFFER_CAPACITY)) > 0) {
+                    send(clt_sock, buf, bytes_cititi, 0);
+                }
+                close(img_fd);
+                unlink("/tmp/debug_calibrare.png"); 
+            }
+
+            close(clt_sock);
             
             pthread_mutex_lock(&g_metrics.mutex);
             g_metrics.active_inet_clients--;
             pthread_mutex_unlock(&g_metrics.mutex);
         }
 
-        
-        (void)unlink(path_copie);
+        unlink(path_copie);
 
         char inreg_ist[BUFFER_CAPACITY];
-        // NOLINTNEXTLINE(stdio-snprintf, security-snprintf)
-        snprintf(inreg_ist, BUFFER_CAPACITY, "JOB: %u | Fişier: %s | Timp: %.2f ms | %s", 
-                 jid, path_copie, d_ms, raspuns);
+        snprintf(inreg_ist, BUFFER_CAPACITY, "JOB: %u | Timp: %.2f ms | %s", jid, d_ms, raspuns);
         adauga_in_istoric(inreg_ist);
 
         pthread_mutex_lock(&g_metrics.mutex);
@@ -209,41 +232,47 @@ static void* worker_thread_func(void* arg) {
     return NULL;
 }
 
+// Functie pentru conexiunea cu clientii
 static void* inet_thread_func(void* arg) {
     (void)arg;
     int srv_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (srv_sock < 0) { return NULL; }
+    if (srv_sock < 0) return NULL; 
 
     int opt = 1;
-    // NOLINTNEXTLINE(misc-include-cleaner)
-    (void)setsockopt(srv_sock, SOL_SOCKET, SO_REUSEADDR, &opt, (socklen_t)sizeof(opt));
+    setsockopt(srv_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    struct sockaddr_in srv_addr = {0};
+    struct sockaddr_in srv_addr;
+    memset(&srv_addr, 0, sizeof(srv_addr));
     srv_addr.sin_family      = AF_INET;
     srv_addr.sin_port        = htons(PORT_INET);
     srv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    if (bind(srv_sock, (struct sockaddr*)&srv_addr, (socklen_t)sizeof(srv_addr)) < 0) {
-        safe_close(srv_sock); return NULL;
+    if (bind(srv_sock, (struct sockaddr*)&srv_addr, sizeof(srv_addr)) < 0) {
+        close(srv_sock); return NULL;
     }
-    if (listen(srv_sock, LISTEN_BACKLOG) < 0) { safe_close(srv_sock); return NULL; }
+    if (listen(srv_sock, LISTEN_BACKLOG) < 0) { close(srv_sock); return NULL; }
 
     struct pollfd fds[MAX_CLIENTS_POLL];
-    for (int i = 0; i < MAX_CLIENTS_POLL; i++) { fds[i].fd = INVALID_DESCRIPTOR; fds[i].events = 0; }
-    fds[0].fd = srv_sock; fds[0].events = POLLIN;
+    for (int i = 0; i < MAX_CLIENTS_POLL; i++) {
+        fds[i].fd = INVALID_DESCRIPTOR;
+        fds[i].events = 0;
+    }
+    fds[0].fd = srv_sock;
+    fds[0].events = POLLIN;
 
     char buf[BUFFER_CAPACITY];
 
     while (g_server_running) {
         int p_cnt = poll(fds, MAX_CLIENTS_POLL, POLL_TIMEOUT_MS);
-        if (p_cnt <= 0) { continue; }
+        if (p_cnt <= 0) continue; 
 
-        if ((fds[0].revents & POLLIN) != 0) {
+        if (fds[0].revents & POLLIN) {
             int new_sock = accept(srv_sock, NULL, NULL);
             if (new_sock >= 0) {
                 for (int i = 1; i < MAX_CLIENTS_POLL; i++) {
                     if (fds[i].fd == INVALID_DESCRIPTOR) {
-                        fds[i].fd = new_sock; fds[i].events = POLLIN;
+                        fds[i].fd = new_sock;
+                        fds[i].events = POLLIN;
                         pthread_mutex_lock(&g_metrics.mutex);
                         g_metrics.active_inet_clients++;
                         pthread_mutex_unlock(&g_metrics.mutex);
@@ -253,48 +282,39 @@ static void* inet_thread_func(void* arg) {
             }
         }
 
-        
         for (int i = 1; i < MAX_CLIENTS_POLL; i++) {
-            if (fds[i].fd != INVALID_DESCRIPTOR && ((fds[i].revents & POLLIN) != 0)) {
+            if (fds[i].fd != INVALID_DESCRIPTOR && (fds[i].revents & POLLIN)) {
                 int clt_fd = fds[i].fd;
-                
-                
                 app_header_t header;
                 ssize_t h_bytes = recv(clt_fd, &header, sizeof(app_header_t), MSG_WAITALL);
                 
-                if (h_bytes == (ssize_t)sizeof(app_header_t) && strncmp(header.magic, "OMR", 3) == 0) {
+                if (h_bytes == sizeof(app_header_t) && strncmp(header.magic, "OMR", 3) == 0) {
                     uint32_t file_size = ntohl(header.file_size);
-                    
-                    
                     char temp_path[BUFFER_CAPACITY];
-                    // NOLINTNEXTLINE(stdio-snprintf, security-snprintf)
-                    snprintf(temp_path, BUFFER_CAPACITY, "/tmp/omr_recv_%d_%ld.png", clt_fd, time(NULL));
                     
+                    snprintf(temp_path, BUFFER_CAPACITY, "/tmp/omr_recv_%d_%ld.png", clt_fd, (long)time(NULL));
+
                     int out_fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
                     if (out_fd >= 0) {
-                        
                         uint32_t ramasi = file_size;
                         while (ramasi > 0) {
-                            size_t de_citit = (ramasi > (uint32_t)BUFFER_CAPACITY) ? (size_t)BUFFER_CAPACITY : (size_t)ramasi;
+                            size_t de_citit = (ramasi > BUFFER_CAPACITY) ? BUFFER_CAPACITY : ramasi;
                             ssize_t cititi = recv(clt_fd, buf, de_citit, 0);
-                            if (cititi <= 0) { break; }
-                            
-                            (void)write(out_fd, buf, (size_t)cititi);
-                            ramasi -= (uint32_t)cititi;
+                            if (cititi <= 0) break; 
+                            write(out_fd, buf, cititi);
+                            ramasi -= cititi;
                         }
-                        safe_close(out_fd);
-
+                        close(out_fd);
                         if (ramasi == 0) {
-                           
                             fds[i].fd = INVALID_DESCRIPTOR;
-                            enqueue_job(temp_path, clt_fd);
-                            continue; 
+                            // TRIMITEM BAREMUL PRINS DIN RETEA CĂTRE COADĂ
+                            enqueue_job(temp_path, clt_fd, header.barem);
+                            continue;
                         }
-                        (void)unlink(temp_path);
+                        unlink(temp_path);
                     }
                 }
-                
-                safe_close(clt_fd);
+                if (clt_fd != INVALID_DESCRIPTOR) close(clt_fd);
                 fds[i].fd = INVALID_DESCRIPTOR;
                 pthread_mutex_lock(&g_metrics.mutex);
                 g_metrics.active_inet_clients--;
@@ -302,27 +322,70 @@ static void* inet_thread_func(void* arg) {
             }
         }
     }
-    for (int i = 0; i < MAX_CLIENTS_POLL; i++) { safe_close(fds[i].fd); }
+    for (int i = 0; i < MAX_CLIENTS_POLL; i++) {
+        if (fds[i].fd != INVALID_DESCRIPTOR) close(fds[i].fd);
+    }
     return NULL;
 }
 
+// Notificare din fisierul /tmp
+static void* inotify_thread_func(void* arg) {
+    (void)arg;
+    int fd = inotify_init();
+    if (fd < 0) { perror("[INotify] Eroare init"); return NULL; }
+
+    int wd = inotify_add_watch(fd, "/tmp", IN_CREATE | IN_CLOSE_WRITE);
+    if (wd < 0) { perror("[INotify] Eroare adaugare watch"); close(fd); return NULL; }
+
+    char buffer[BUFFER_CAPACITY];
+    printf("[INotify] Firul de monitorizare a kernelului pornit cu succes pentru /tmp...\n");
+
+    while (g_server_running) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int ret = poll(&pfd, 1, POLL_TIMEOUT_MS);
+        if (ret <= 0) continue;
+
+        ssize_t length = read(fd, buffer, sizeof(buffer));
+        if (length < 0) break;
+
+        int i = 0;
+        while (i < length) {
+            struct inotify_event* event = (struct inotify_event*)&buffer[i];
+            if (event->len > 0) {
+                if (strstr(event->name, "omr_recv_") != NULL) {
+                    if (event->mask & IN_CREATE) {
+                        printf("[INOTIFY EVENT] Clientul a inceput incarcarea: %s\n", event->name);
+                    } else if (event->mask & IN_CLOSE_WRITE) {
+                        printf("[INOTIFY EVENT] Incarcare finalizata pentru: %s\n", event->name);
+                    }
+                }
+            }
+            i += sizeof(struct inotify_event) + event->len;
+        }
+    }
+
+    inotify_rm_watch(fd, wd);
+    close(fd);
+    return NULL;
+}
+
+// Socket unix pentru admin 
 static void* admin_thread_func(void* arg) {
     (void)arg;
     int unix_sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (unix_sock < 0) { perror("[ERR] socket UNIX"); return NULL; }
 
-    (void)unlink(UNIX_SOCKET_PATH);
+    unlink(UNIX_SOCKET_PATH);
     struct sockaddr_un un_addr;
     memset(&un_addr, 0, sizeof(struct sockaddr_un));
     un_addr.sun_family = AF_UNIX;
     strncpy(un_addr.sun_path, UNIX_SOCKET_PATH, sizeof(un_addr.sun_path) - 1);
 
-    if (bind(unix_sock, (struct sockaddr*)&un_addr, (socklen_t)sizeof(struct sockaddr_un)) < 0) {
-        perror("[ERR] bind UNIX"); safe_close(unix_sock); return NULL;
+    if (bind(unix_sock, (struct sockaddr*)&un_addr, sizeof(un_addr)) < 0) {
+        perror("[ERR] bind UNIX"); close(unix_sock); return NULL;
     }
-
     if (listen(unix_sock, 1) < 0) {
-        perror("[ERR] listen UNIX"); safe_close(unix_sock); return NULL;
+        perror("[ERR] listen UNIX"); close(unix_sock); return NULL;
     }
 
     int active_admin_fd = INVALID_DESCRIPTOR;
@@ -330,97 +393,123 @@ static void* admin_thread_func(void* arg) {
     char buf[BUFFER_CAPACITY];
     char raport[BUFFER_CAPACITY * 4];
 
-    struct pollfd pfd;
-    pfd.events = POLLIN;
+    struct pollfd fds[2];
+    fds[0].fd = unix_sock;
+    fds[0].events = POLLIN;
+    fds[1].fd = INVALID_DESCRIPTOR;
+    fds[1].events = POLLIN;
 
     while (g_server_running) {
+        fds[1].fd = active_admin_fd;
         
-        pfd.fd = (active_admin_fd == INVALID_DESCRIPTOR) ? unix_sock : active_admin_fd;
-        int pcount = poll(&pfd, 1, POLL_TIMEOUT_MS);
-
-        if (pcount < 0) { if (errno == EINTR) { continue; } break; }
+        int pcount = poll(fds, 2, POLL_TIMEOUT_MS);
+        if (pcount < 0) { if (errno == EINTR) continue; break; }
 
         if (active_admin_fd != INVALID_DESCRIPTOR) {
             time_t now = time(NULL);
             if (now - last_activity_time > TIMEOUT_ADMIN_SEC) {
                 const char* msg_to = "\n[Server] Deconectat pentru inactivitate.\n";
-                (void)send(active_admin_fd, msg_to, strlen(msg_to), 0);
-                safe_close(active_admin_fd);
+                send(active_admin_fd, msg_to, strlen(msg_to), 0);
+                close(active_admin_fd);
                 active_admin_fd = INVALID_DESCRIPTOR;
-                printf("[Server Admin] Administrator deconectat automat (Timeout %ds).\n", TIMEOUT_ADMIN_SEC);
+                printf("[Server Admin] Administrator deconectat automat.\n");
                 continue;
             }
         }
+        if (pcount == 0) continue; 
 
-        if (pcount == 0) { continue; }
-
-        if (active_admin_fd == INVALID_DESCRIPTOR && ((pfd.revents & POLLIN) != 0)) {
-            active_admin_fd = accept(unix_sock, NULL, NULL);
-            if (active_admin_fd >= 0) {
-                last_activity_time = time(NULL);
-                printf("[Server Admin] Administrator nou conectat.\n");
+        if (fds[0].revents & POLLIN) {
+            int new_sock = accept(unix_sock, NULL, NULL);
+            if (new_sock >= 0) {
+                if (active_admin_fd != INVALID_DESCRIPTOR) {
+                    // SCĂUNUL E OCUPAT - Dam reject ferm!
+                    send(new_sock, "BUSY", 4, 0);
+                    close(new_sock);
+                } else {
+                    active_admin_fd = new_sock;
+                    last_activity_time = time(NULL);
+                    send(active_admin_fd, "OK", 2, 0); // Trimitem handshake-ul de succes
+                    printf("[Server Admin] Administrator conectat.\n");
+                }
             }
-        } 
-        else if (active_admin_fd != INVALID_DESCRIPTOR && ((pfd.revents & POLLIN) != 0)) {
+        }
+
+        if (active_admin_fd != INVALID_DESCRIPTOR && (fds[1].revents & POLLIN)) {
             memset(buf, 0, BUFFER_CAPACITY);
             ssize_t bytes = recv(active_admin_fd, buf, BUFFER_CAPACITY - 1, 0);
-
             if (bytes <= 0) {
-                safe_close(active_admin_fd);
+                close(active_admin_fd);
                 active_admin_fd = INVALID_DESCRIPTOR;
                 printf("[Server Admin] Administrator deconectat.\n");
                 continue;
             }
-
             last_activity_time = time(NULL);
             buf[bytes] = '\0';
+            buf[strcspn(buf, "\r\n")] = '\0';
+            
             memset(raport, 0, sizeof(raport));
 
             pthread_mutex_lock(&g_metrics.mutex);
             if (strcmp(buf, "report:clients") == 0) {
-                sprintf(raport, "Clienti INET activi: %d", g_metrics.active_inet_clients);
+                snprintf(raport, sizeof(raport), "Clienti INET activi: %d\n", g_metrics.active_inet_clients);
             } else if (strcmp(buf, "report:queue") == 0) {
                 pthread_mutex_lock(&g_queue.mutex);
-                sprintf(raport, "Sarcini in coada FIFO: %d / %d", g_queue.count, MAX_QUEUE_JOBS);
+                snprintf(raport, sizeof(raport), "Sarcini in coada FIFO: %d / %d\n", g_queue.count, MAX_QUEUE_JOBS);
                 pthread_mutex_unlock(&g_queue.mutex);
             } else if (strcmp(buf, "report:current") == 0) {
-                sprintf(raport, "In executie: %s", (strlen(g_metrics.current_processing_file) > 0) ? g_metrics.current_processing_file : "Nimic");
+                snprintf(raport, sizeof(raport), "In executie: %s\n", 
+                         strlen(g_metrics.current_processing_file) > 0 ? g_metrics.current_processing_file : "Nimic");
             } else if (strcmp(buf, "report:time") == 0) {
-                double avg = (g_metrics.total_processed_jobs > 0) ? (g_metrics.total_execution_time_ms / g_metrics.total_processed_jobs) : 0;
-                sprintf(raport, "Durata medie: %.2f ms", avg);
+                double avg = (g_metrics.total_processed_jobs > 0) ?
+                             (g_metrics.total_execution_time_ms / g_metrics.total_processed_jobs) : 0;
+                snprintf(raport, sizeof(raport), "Durata medie: %.2f ms\n", avg);
             } else if (strcmp(buf, "report:history") == 0) {
-                strcpy(raport, "--- Istoric Ultimelor Corectari ---\n");
-                int start = (g_metrics.history_count > MAX_HISTORY_RECORDS) ? g_metrics.history_count - MAX_HISTORY_RECORDS : 0;
+                snprintf(raport, sizeof(raport), "--- Istoric Ultimelor Corectari ---\n");
+                int start = (g_metrics.history_count > MAX_HISTORY_RECORDS) ?
+                            g_metrics.history_count - MAX_HISTORY_RECORDS : 0;
                 for (int i = start; i < g_metrics.history_count; i++) {
-                    strcat(raport, g_metrics.history[i % MAX_HISTORY_RECORDS]);
-                    strcat(raport, "\n");
+                    strncat(raport, g_metrics.history[i % MAX_HISTORY_RECORDS], sizeof(raport) - strlen(raport) - 1);
+                    strncat(raport, "\n", sizeof(raport) - strlen(raport) - 1);
                 }
             } else if (strcmp(buf, "report:success") == 0) {
-                double r = (g_metrics.total_processed_jobs > 0) ? ((double)g_metrics.total_successful_jobs / g_metrics.total_processed_jobs * 100) : 0;
-                sprintf(raport, "Rata succes: %.2f%% (%d/%d)", r, g_metrics.total_successful_jobs, g_metrics.total_processed_jobs);
+                double r = (g_metrics.total_processed_jobs > 0) ?
+                           ((double)g_metrics.total_successful_jobs / g_metrics.total_processed_jobs * 100) : 0;
+                snprintf(raport, sizeof(raport), "Rata succes: %.2f%% (%d/%d)\n", 
+                         r, g_metrics.total_successful_jobs, g_metrics.total_processed_jobs);
+            } else if (strcmp(buf, "0") == 0) {
+                snprintf(raport, sizeof(raport), "[Admin] Comanda 0 primita. Serverul se opreste de voie buna...\n");
+                g_server_running = 0;
+                
+                pthread_mutex_lock(&g_queue.mutex);
+                pthread_cond_broadcast(&g_queue.cond);
+                pthread_mutex_unlock(&g_queue.mutex);
             } else {
-                strcpy(raport, "Comanda admin necunoscuta.");
+                snprintf(raport, sizeof(raport), "Comanda admin necunoscuta.\n");
             }
             pthread_mutex_unlock(&g_metrics.mutex);
-
-            (void)send(active_admin_fd, raport, strlen(raport), 0);
+            send(active_admin_fd, raport, strlen(raport), 0);
         }
     }
-
-    safe_close(unix_sock);
+    
+    if (active_admin_fd != INVALID_DESCRIPTOR) close(active_admin_fd);
+    close(unix_sock);
     unlink(UNIX_SOCKET_PATH);
     return NULL;
 }
+
 int main(void) {
     init_queue();
     pthread_mutex_init(&g_metrics.mutex, NULL);
-    printf("[Server] Pornit pe portul %d cu transport binar de fisiere (Nivel A)...\n", PORT_INET);
+    printf("[Server] Pornit pe portul %d. Suporta BAREME DINAMICE prin retea!\n", PORT_INET);
 
-    pthread_t t_w, t_i, t_a;
+    pthread_t t_w, t_i, t_a, t_n; 
     pthread_create(&t_w, NULL, worker_thread_func, NULL);
     pthread_create(&t_i, NULL, inet_thread_func, NULL);
     pthread_create(&t_a, NULL, admin_thread_func, NULL);
+    pthread_create(&t_n, NULL, inotify_thread_func, NULL); 
 
-    while (g_server_running) { sleep(10); } // NOLINT(concurrency-mt-unsafe)
+    while (g_server_running) { sleep(1); }
+    
+    printf("\n[Server] Incheiat. Toate firele de executie au fost eliberate.\n");
     return 0;
 }

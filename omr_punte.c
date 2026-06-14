@@ -2,118 +2,119 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Biblioteca wrapper pentru opencv
-typedef struct Mat_t Mat_t;
-
-typedef struct {
-    const char* c_str;
-    size_t length;
-} ocv_string_t;
-
-extern Mat_t* pCvimread(ocv_string_t* filename, int flags);
-
-enum ConfigConstants {
-    MAX_INTREBARI         = 40,
-    BUFFER_LINIE          = 64,
-    IMREAD_COLOR_MODE     = 1,
-    STATUS_EROARE         = 0,
-    STATUS_SUCCES         = 1,
-    RASPUNS_INVALID       = -1,
-    BITS_PER_OPTIUNE      = 2,
-    GRUP_INTREBARI_DIM    = 20
+// Declaratii pentru wrapper
+struct string_t {
+    char* v;
+    int nrchar;
 };
 
-enum OptiuniBarem {
-    VARIANTA_A = 0,
-    VARIANTA_B = 1,
-    VARIANTA_C = 2,
-    VARIANTA_D = 3
-};
+struct Mat_t;
 
-static int g_raspunsuri_student[MAX_INTREBARI];
-static int g_barem_corect[MAX_INTREBARI];
+extern struct string_t* pCvStringCreate(const int nrchar);
+extern void pCvStringDelete(struct string_t* wrapper);
+extern struct Mat_t* pCvimread(struct string_t* filename, int flags);
 
-static void incarca_barem_c(const char *nume_fisier) {
-    for (size_t idx = 0; idx < (size_t)MAX_INTREBARI; idx++) {
-        g_barem_corect[idx] = RASPUNS_INVALID;
-    }
+extern unsigned char pCvMatGetByte(struct Mat_t* wrapper, int rowind, int colind, int channel);
+extern unsigned char pCvMatSetByte(struct Mat_t* wrapper, int rowind, int colind, unsigned char value, int channel);
+extern int pCvMatGetWidth(struct Mat_t* wrapper);
+extern int pCvMatGetHeight(struct Mat_t* wrapper);
+extern void pCvMatDelete(struct Mat_t* wrapper);
 
-    FILE *fisier = fopen(nume_fisier, "r");
-    if (fisier == NULL) {
-        (void)printf("[ERR] Nu am putut deschide fisierul barem: %s\n", nume_fisier);
-        return;
-    }
 
-    char linie[BUFFER_LINIE];
-    size_t index_intrebare = 0;
-
-    while (fgets(linie, BUFFER_LINIE, fisier) != NULL && index_intrebare < (size_t)MAX_INTREBARI) {
-        if (strchr(linie, 'A') != NULL)      { g_barem_corect[index_intrebare] = VARIANTA_A; }
-        else if (strchr(linie, 'B') != NULL) { g_barem_corect[index_intrebare] = VARIANTA_B; }
-        else if (strchr(linie, 'C') != NULL) { g_barem_corect[index_intrebare] = VARIANTA_C; }
-        else if (strchr(linie, 'D') != NULL) { g_barem_corect[index_intrebare] = VARIANTA_D; }
-        else                                 { g_barem_corect[index_intrebare] = RASPUNS_INVALID; }
-        
-        index_intrebare++;
-    }
-
-    (void)fclose(fisier);
-}
-
-static void analizeaza_grila_optica_matematic(void) {
-    unsigned long long masca_grup1 = 698955583958ULL;
+// Salvarea imaginii modificate pentru a determina manual daca s-a corectat bine 
+void salveaza_imagine_debug(struct Mat_t* imagine, const char* cale_fisier_png) {
+    int w = pCvMatGetWidth(imagine);
+    int h = pCvMatGetHeight(imagine);
     
-    unsigned long long masca_grup2 = 669884342627ULL;
-
-    for (size_t q = 0; q < (size_t)MAX_INTREBARI; q++) {
-        if (q < (size_t)GRUP_INTREBARI_DIM) {
-            unsigned int shift = (unsigned int)(q * (size_t)BITS_PER_OPTIUNE);
-            g_raspunsuri_student[q] = (int)((masca_grup1 >> shift) & 3ULL);
+    FILE* f = fopen("/tmp/temp_debug.pgm", "wb");
+    if (f) {
+        fprintf(f, "P5\n%d %d\n255\n", w, h);
+        unsigned char* rand_pixeli = malloc(w);
+        for(int y = 0; y < h; y++) {
+            for(int x = 0; x < w; x++) {
+                rand_pixeli[x] = pCvMatGetByte(imagine, y, x, 0);
+            }
+            fwrite(rand_pixeli, 1, w, f);
+        }
+        free(rand_pixeli);
+        fclose(f);
+        
+        char comanda[512];
+        sprintf(comanda, "convert /tmp/temp_debug.pgm %s", cale_fisier_png);
+        int res = system(comanda);
+        
+        if(res == 0) {
+            printf("[DEBUG-OPENCV] Imaginea calibrata salvata ca PNG: %s\n", cale_fisier_png);
         } else {
-            unsigned int shift = (unsigned int)((q - (size_t)GRUP_INTREBARI_DIM) * (size_t)BITS_PER_OPTIUNE);
-            g_raspunsuri_student[q] = (int)((masca_grup2 >> shift) & 3ULL);
+            printf("[DEBUG-OPENCV] EROARE: Verifica existenta ImageMagick (sudo apt install imagemagick)\n");
         }
     }
 }
 
-int incarca_imagine_opencv(const char *cale) {
-    incarca_barem_c("barem.txt");
-
-    for (size_t idx = 0; idx < (size_t)MAX_INTREBARI; idx++) {
-        g_raspunsuri_student[idx] = RASPUNS_INVALID;
-    }
-
-    ocv_string_t cale_wrap = {0};
-    cale_wrap.c_str  = cale;
-    cale_wrap.length = strlen(cale);
-
-    Mat_t *imagine = pCvimread(&cale_wrap, IMREAD_COLOR_MODE);
-    if (imagine == NULL) {
-        (void)printf("[ERR] Wrapper-ul OpenCV nu a putut deschide imaginea: %s\n", cale);
-        return STATUS_EROARE;
-    }
-
-    (void)printf("[OpenCV Wrapper] Imagine incarcata cu succes in matrice opaca (%p).\n", (void*)imagine);
-
-    analizeaza_grila_optica_matematic();
-
-    return STATUS_SUCCES;
+// Functii folosite in server
+struct Mat_t* incarca_imagine_opencv(const char* cale_fisier) {
+    int lungime = strlen(cale_fisier);
+    struct string_t* cale_wrapper = pCvStringCreate(lungime);
+    strcpy(cale_wrapper->v, cale_fisier); 
+    
+    struct Mat_t* img = pCvimread(cale_wrapper, 0); 
+    pCvStringDelete(cale_wrapper);
+    
+    return img;
 }
 
-int proceseaza_intrebare_opencv(int nr_intrebare) {
-    if (nr_intrebare < 1 || nr_intrebare > MAX_INTREBARI) {
-        return STATUS_EROARE;
+int proceseaza_intrebare_opencv(struct Mat_t* imagine, int index_intrebare, char raspuns_corect) {
+    if (imagine == NULL) return 0;
+
+    int w = pCvMatGetWidth(imagine);
+    int h = pCvMatGetHeight(imagine);
+
+    int offset_optiune = raspuns_corect - 'A'; 
+    int coloana = index_intrebare / 20;        
+    int rand_intrebare = index_intrebare % 20;
+
+    // Coordonatele Bulinelor pentru a putea face verificarea
+    // Inceputul bulinelor pe imagine
+    int START_X = 55;         // Axa X
+    int START_Y = 10;         // Axa Y
+    
+    // Distantele dintre coloane,randuri si linii
+    int SPATIU_COLOANE = 291;
+    int SPATIU_RANDURI = 31;  
+    int SPATIU_LITERE = 30;   
+    
+    int dimensiune_bula = 30;
+    
+    int x_start = START_X + (coloana * SPATIU_COLOANE) + (offset_optiune * SPATIU_LITERE); 
+    int y_start = START_Y + (rand_intrebare * SPATIU_RANDURI);
+    
+    int pixeli_negri = 0;
+
+    if (!(x_start < 0 || y_start < 0 || x_start + dimensiune_bula >= w || y_start + dimensiune_bula >= h)) {
+        for(int y = y_start; y < y_start + dimensiune_bula; y++) {
+            for(int x = x_start; x < x_start + dimensiune_bula; x++) {
+                
+                unsigned char pixel = pCvMatGetByte(imagine, y, x, 0);
+                if(pixel < 128) { 
+                    pixeli_negri++;
+                }
+                
+                // Desenam chenarul negru pentru vizualizare
+                if (y == y_start || y == y_start + dimensiune_bula - 1 ||
+                    x == x_start || x == x_start + dimensiune_bula - 1) {
+                    pCvMatSetByte(imagine, y, x, 0, 0); 
+                }
+            }
+        }
     }
 
-    size_t index = (size_t)(nr_intrebare - 1);
-
-    if (g_raspunsuri_student[index] == RASPUNS_INVALID) {
-        return STATUS_EROARE; 
+    if (index_intrebare == 39) {
+        salveaza_imagine_debug(imagine, "/tmp/debug_calibrare.png");
     }
 
-    if (g_raspunsuri_student[index] == g_barem_corect[index]) {
-        return STATUS_SUCCES; 
+    // Numarul de pixeli negri minimi care trebuie sa aiba bula pentru a fi considerat raspuns corect
+    if (pixeli_negri > 200) {
+        return 1;
     }
-
-    return STATUS_EROARE;
+    return 0;
 }
