@@ -2,9 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// ========================================================
-// 1. DECLARAȚII MANUALE PENTRU OPENCV WRAPPER
-// ========================================================
+// Declaratii pentru wrapper
 struct string_t {
     char* v;
     int nrchar;
@@ -23,14 +21,11 @@ extern int pCvMatGetHeight(struct Mat_t* wrapper);
 extern void pCvMatDelete(struct Mat_t* wrapper);
 
 
-// ========================================================
-// 2. FUNCȚIE DE SALVARE ÎN PNG PENTRU DEBUG
-// ========================================================
+// Salvarea imaginii modificate pentru a determina manual daca s-a corectat bine 
 void salveaza_imagine_debug(struct Mat_t* imagine, const char* cale_fisier_png) {
     int w = pCvMatGetWidth(imagine);
     int h = pCvMatGetHeight(imagine);
     
-    // Salvăm un PGM temporar
     FILE* f = fopen("/tmp/temp_debug.pgm", "wb");
     if (f) {
         fprintf(f, "P5\n%d %d\n255\n", w, h);
@@ -44,7 +39,6 @@ void salveaza_imagine_debug(struct Mat_t* imagine, const char* cale_fisier_png) 
         free(rand_pixeli);
         fclose(f);
         
-        // Convertim nativ in PNG prin utilitarul sistemului
         char comanda[512];
         sprintf(comanda, "convert /tmp/temp_debug.pgm %s", cale_fisier_png);
         int res = system(comanda);
@@ -57,9 +51,7 @@ void salveaza_imagine_debug(struct Mat_t* imagine, const char* cale_fisier_png) 
     }
 }
 
-// ========================================================
-// 3. FUNCȚIILE AȘTEPTATE DE SERVERGRADING.C
-// ========================================================
+// Functii folosite in server
 struct Mat_t* incarca_imagine_opencv(const char* cale_fisier) {
     int lungime = strlen(cale_fisier);
     struct string_t* cale_wrapper = pCvStringCreate(lungime);

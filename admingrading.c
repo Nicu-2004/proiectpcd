@@ -62,7 +62,7 @@ static void cere_raport(int sock, const char* cod_raport) {
     printf("\n[RAPORT PRIMIT]\n%s\n", raspuns);
 }
 
-// Copiere sigură a unui șir într-un buffer de dimensiune fixă (fără snprintf/strncpy)
+// Copiere sigură a unui șir
 static void copy_string_safe(char *dest, size_t dest_size, const char *src) {
     size_t i;
     for (i = 0; i < dest_size - 1 && src[i] != '\0'; ++i) {
@@ -72,22 +72,30 @@ static void copy_string_safe(char *dest, size_t dest_size, const char *src) {
 }
 
 int main(void) {
-    // Initializare socket unix in format TCP
+    // Initializare socket unix
     int sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) { 
         perror("[ERR] socket"); 
         return STATUS_FAILURE; 
     }
 
-    // Initializare structura unix pe variabila un_addr
+    // Initializare structura socket unix
     struct sockaddr_un un_addr = {0};
     un_addr.sun_family = AF_UNIX;
-    // Copiere manuală sigură (înlocuiește strncpy/snprintf)
     copy_string_safe(un_addr.sun_path, sizeof(un_addr.sun_path), UNIX_SOCKET_PATH);
 
+    // Conexiunea 1:1 intre admin si server
     printf("[AdminApp] Se incearca blocarea exclusiva a serverului pe %s...\n", UNIX_SOCKET_PATH);
     if (connect(sock, (struct sockaddr*)&un_addr, (socklen_t)sizeof(struct sockaddr_un)) < 0) {
-        printf("[ERR] Acces respins! Un alt administrator este conectat sau serverul este oprit.\n");
+        printf("[ERR] Serverul este oprit sau nu raspunde.\n");
+        safe_close(sock);
+        return STATUS_FAILURE;
+    }
+
+    // Asteptarea confirmarii prin handshake
+    char handshake[16] = {0};
+    if (recv(sock, handshake, sizeof(handshake), 0) <= 0 || strncmp(handshake, "OK", 2) != 0) {
+        printf("\n[ERR] Acces respins! Un alt administrator este deja conectat.\n");
         safe_close(sock);
         return STATUS_FAILURE;
     }
@@ -95,6 +103,7 @@ int main(void) {
     printf("[AdminApp] Conectat cu succes! Sesiunea detine control exclusiv.\n");
     char opt[DIM_SELECTIE];
 
+    // Meniul adminului si preluarea inputului
     while (1) {
         afiseaza_meniu_admin();
         if (fgets(opt, DIM_SELECTIE, stdin) == NULL) { 

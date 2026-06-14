@@ -17,11 +17,14 @@
 #include <arpa/inet.h>
 #include <sys/inotify.h>
 
+// Protocolul de retea 
 typedef struct {
     char magic[4];
     uint32_t file_size;
+    char barem[40]; 
 } app_header_t;
 
+// Configuratiile serverului in format enum
 enum ConfigServer {
     PORT_INET            = 9090,
     MAX_CLIENTS_POLL     = 64,
@@ -39,19 +42,21 @@ enum ConfigServer {
 
 static const char* UNIX_SOCKET_PATH = "/tmp/omr_admin.sock";
 
+// Conexiunea cu libraria OpenCV in loc de #include
 struct Mat_t;
 extern struct Mat_t* incarca_imagine_opencv(const char* cale_fisier);
 extern int proceseaza_intrebare_opencv(struct Mat_t* imagine, int index_intrebare, char raspuns_corect);
 extern void pCvMatDelete(struct Mat_t* wrapper); 
 
-static char barem[40];
-
+// Informatii job 
 typedef struct {
     unsigned int job_id;
     char file_path[BUFFER_CAPACITY];
     int client_socket_fd;
+    char barem_asociat[40];
 } omr_job_t;
 
+// Coada FIFO cu head/tail
 typedef struct {
     omr_job_t jobs[MAX_QUEUE_JOBS];
     int head;
@@ -62,6 +67,7 @@ typedef struct {
     pthread_cond_t cond;
 } job_queue_t;
 
+// Informatii 
 typedef struct {
     int active_inet_clients;
     int total_processed_jobs;
@@ -86,6 +92,7 @@ static void adauga_in_istoric(const char* inreg) {
     pthread_mutex_unlock(&g_metrics.mutex);
 }
 
+// Initializare coada FIFO
 static void init_queue(void) {
     memset(&g_queue, 0, sizeof(job_queue_t));
     g_queue.next_job_id = 100;
@@ -93,7 +100,8 @@ static void init_queue(void) {
     pthread_cond_init(&g_queue.cond, NULL);
 }
 
-static void enqueue_job(const char* cale, int clt_fd) {
+// Adaugare sarcina in FIFO
+static void enqueue_job(const char* cale, int clt_fd, const char* barem_primit) {
     pthread_mutex_lock(&g_queue.mutex);
     if (g_queue.count >= MAX_QUEUE_JOBS) {
         char *err = "ERR: Coada serverului este plina!";
@@ -107,6 +115,7 @@ static void enqueue_job(const char* cale, int clt_fd) {
     g_queue.jobs[t_idx].job_id = g_queue.next_job_id++;
     strncpy(g_queue.jobs[t_idx].file_path, cale, BUFFER_CAPACITY - 1);
     g_queue.jobs[t_idx].client_socket_fd = clt_fd;
+    memcpy(g_queue.jobs[t_idx].barem_asociat, barem_primit, 40);
 
     g_queue.tail = (g_queue.tail + 1) % MAX_QUEUE_JOBS;
     g_queue.count++;
@@ -115,56 +124,27 @@ static void enqueue_job(const char* cale, int clt_fd) {
     pthread_mutex_unlock(&g_queue.mutex);
 }
 
-static int incarca_barem_din_fisier(const char* cale_fisier) {
-    FILE* f = fopen(cale_fisier, "r");
-    if (!f) {
-        perror("[ERR] Nu am putut deschide fisierul de barem");
-        return -1;
-    }
-
-    char linie[64];
-    int gasite = 0;
-    
-    while (fgets(linie, sizeof(linie), f)) {
-        int nr_intrebare;
-        char raspuns_corect;
-        if (sscanf(linie, "%d: %c", &nr_intrebare, &raspuns_corect) == 2) {
-            if (nr_intrebare >= 1 && nr_intrebare <= NR_INTREBARI_TEST) {
-                barem[nr_intrebare - 1] = raspuns_corect; 
-                gasite++;
-            }
-        }
-    }
-    fclose(f);
-
-    if (gasite != NR_INTREBARI_TEST) {
-        printf("[ERR] Baremul '%s' este invalid sau incomplet! Am gasit doar %d raspunsuri din %d.\n", 
-               cale_fisier, gasite, NR_INTREBARI_TEST);
-        return -1;
-    }
-    
-    printf("[Server] Barem incarcat cu succes din '%s'.\n", cale_fisier);
-    return 0;
-}
-
-static float executa_evaluare_test(const char *cale_imagine) {
+// Evaluarea pozei folosind OpenCV pentru fiecare intrebare
+static float executa_evaluare_test(const char *cale_imagine, const char* barem_dinamic) {
     struct Mat_t* imagine = incarca_imagine_opencv(cale_imagine);
     if (imagine == NULL) return -1.0F; 
     
     int total_corecte = 0;
     for (int i = 0; i < NR_INTREBARI_TEST; i++) {
-        total_corecte += proceseaza_intrebare_opencv(imagine, i, barem[i]);
+        total_corecte += proceseaza_intrebare_opencv(imagine, i, barem_dinamic[i]);
     }
     
     pCvMatDelete(imagine);
     return ((float)total_corecte / (float)NR_INTREBARI_TEST) * 10.0F;
 }
 
+// Worker thread
 static void* worker_thread_func(void* arg) {
     (void)arg;
     struct timespec start_t, end_t;
     char raspuns[256];
     char path_copie[BUFFER_CAPACITY];
+    char barem_copie[40];
 
     while (g_server_running) {
         pthread_mutex_lock(&g_queue.mutex);
@@ -177,6 +157,7 @@ static void* worker_thread_func(void* arg) {
         strncpy(path_copie, g_queue.jobs[cur_idx].file_path, BUFFER_CAPACITY - 1);
         int clt_sock = g_queue.jobs[cur_idx].client_socket_fd;
         unsigned int jid = g_queue.jobs[cur_idx].job_id;
+        memcpy(barem_copie, g_queue.jobs[cur_idx].barem_asociat, 40);
 
         g_queue.head = (g_queue.head + 1) % MAX_QUEUE_JOBS;
         g_queue.count--;
@@ -187,7 +168,8 @@ static void* worker_thread_func(void* arg) {
         pthread_mutex_unlock(&g_metrics.mutex);
 
         clock_gettime(CLOCK_MONOTONIC, &start_t);
-        float nota = executa_evaluare_test(path_copie);
+
+        float nota = executa_evaluare_test(path_copie, barem_copie);
         clock_gettime(CLOCK_MONOTONIC, &end_t);
 
         double d_ms = (double)(end_t.tv_sec - start_t.tv_sec) * 1000.0 +
@@ -201,13 +183,11 @@ static void* worker_thread_func(void* arg) {
         }
 
         if (clt_sock != INVALID_DESCRIPTOR) {
-            // 1. Trimitem textul pe un buffer fix de 256 octeți (Protocol)
             char text_buffer[256];
             memset(text_buffer, 0, 256);
             strncpy(text_buffer, raspuns, 255);
             send(clt_sock, text_buffer, 256, 0);
 
-            // 2. Verificăm dacă avem poza rezultată pe disc
             int img_fd = open("/tmp/debug_calibrare.png", O_RDONLY);
             uint32_t file_size = 0;
             struct stat st;
@@ -216,11 +196,9 @@ static void* worker_thread_func(void* arg) {
                 file_size = st.st_size;
             }
 
-            // 3. Trimitem dimensiunea pozei (sau 0 dacă a picat evaluarea)
             uint32_t net_size = htonl(file_size);
             send(clt_sock, &net_size, sizeof(net_size), 0);
 
-            // 4. Dacă avem poză, o trimitem binar și curățăm serverul
             if (file_size > 0) {
                 char buf[BUFFER_CAPACITY];
                 ssize_t bytes_cititi;
@@ -228,7 +206,7 @@ static void* worker_thread_func(void* arg) {
                     send(clt_sock, buf, bytes_cititi, 0);
                 }
                 close(img_fd);
-                unlink("/tmp/debug_calibrare.png"); // Ștergem dovada de pe server!
+                unlink("/tmp/debug_calibrare.png"); 
             }
 
             close(clt_sock);
@@ -254,6 +232,7 @@ static void* worker_thread_func(void* arg) {
     return NULL;
 }
 
+// Functie pentru conexiunea cu clientii
 static void* inet_thread_func(void* arg) {
     (void)arg;
     int srv_sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -328,7 +307,8 @@ static void* inet_thread_func(void* arg) {
                         close(out_fd);
                         if (ramasi == 0) {
                             fds[i].fd = INVALID_DESCRIPTOR;
-                            enqueue_job(temp_path, clt_fd);
+                            // TRIMITEM BAREMUL PRINS DIN RETEA CĂTRE COADĂ
+                            enqueue_job(temp_path, clt_fd, header.barem);
                             continue;
                         }
                         unlink(temp_path);
@@ -348,6 +328,7 @@ static void* inet_thread_func(void* arg) {
     return NULL;
 }
 
+// Notificare din fisierul /tmp
 static void* inotify_thread_func(void* arg) {
     (void)arg;
     int fd = inotify_init();
@@ -373,9 +354,9 @@ static void* inotify_thread_func(void* arg) {
             if (event->len > 0) {
                 if (strstr(event->name, "omr_recv_") != NULL) {
                     if (event->mask & IN_CREATE) {
-                        printf("[INOTIFY EVENT] 📂 Clientul a inceput incarcarea: %s\n", event->name);
+                        printf("[INOTIFY EVENT] Clientul a inceput incarcarea: %s\n", event->name);
                     } else if (event->mask & IN_CLOSE_WRITE) {
-                        printf("[INOTIFY EVENT] ✅ Incarcare finalizata pentru: %s\n", event->name);
+                        printf("[INOTIFY EVENT] Incarcare finalizata pentru: %s\n", event->name);
                     }
                 }
             }
@@ -388,6 +369,7 @@ static void* inotify_thread_func(void* arg) {
     return NULL;
 }
 
+// Socket unix pentru admin 
 static void* admin_thread_func(void* arg) {
     (void)arg;
     int unix_sock = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -411,12 +393,16 @@ static void* admin_thread_func(void* arg) {
     char buf[BUFFER_CAPACITY];
     char raport[BUFFER_CAPACITY * 4];
 
-    struct pollfd pfd;
-    pfd.events = POLLIN;
+    struct pollfd fds[2];
+    fds[0].fd = unix_sock;
+    fds[0].events = POLLIN;
+    fds[1].fd = INVALID_DESCRIPTOR;
+    fds[1].events = POLLIN;
 
     while (g_server_running) {
-        pfd.fd = (active_admin_fd == INVALID_DESCRIPTOR) ? unix_sock : active_admin_fd;
-        int pcount = poll(&pfd, 1, POLL_TIMEOUT_MS);
+        fds[1].fd = active_admin_fd;
+        
+        int pcount = poll(fds, 2, POLL_TIMEOUT_MS);
         if (pcount < 0) { if (errno == EINTR) continue; break; }
 
         if (active_admin_fd != INVALID_DESCRIPTOR) {
@@ -432,13 +418,23 @@ static void* admin_thread_func(void* arg) {
         }
         if (pcount == 0) continue; 
 
-        if (active_admin_fd == INVALID_DESCRIPTOR && (pfd.revents & POLLIN)) {
-            active_admin_fd = accept(unix_sock, NULL, NULL);
-            if (active_admin_fd >= 0) {
-                last_activity_time = time(NULL);
-                printf("[Server Admin] Administrator conectat.\n");
+        if (fds[0].revents & POLLIN) {
+            int new_sock = accept(unix_sock, NULL, NULL);
+            if (new_sock >= 0) {
+                if (active_admin_fd != INVALID_DESCRIPTOR) {
+                    // SCĂUNUL E OCUPAT - Dam reject ferm!
+                    send(new_sock, "BUSY", 4, 0);
+                    close(new_sock);
+                } else {
+                    active_admin_fd = new_sock;
+                    last_activity_time = time(NULL);
+                    send(active_admin_fd, "OK", 2, 0); // Trimitem handshake-ul de succes
+                    printf("[Server Admin] Administrator conectat.\n");
+                }
             }
-        } else if (active_admin_fd != INVALID_DESCRIPTOR && (pfd.revents & POLLIN)) {
+        }
+
+        if (active_admin_fd != INVALID_DESCRIPTOR && (fds[1].revents & POLLIN)) {
             memset(buf, 0, BUFFER_CAPACITY);
             ssize_t bytes = recv(active_admin_fd, buf, BUFFER_CAPACITY - 1, 0);
             if (bytes <= 0) {
@@ -502,14 +498,9 @@ static void* admin_thread_func(void* arg) {
 }
 
 int main(void) {
-    if (incarca_barem_din_fisier("barem.txt") < 0) {
-        printf("[Server] EROARE CRITICA: Nu am gasit fisierul 'barem.txt'.\n");
-        return EXIT_FAILURE;
-    }
-
     init_queue();
     pthread_mutex_init(&g_metrics.mutex, NULL);
-    printf("[Server] Pornit pe portul %d cu transport binar de fisiere BIDIRECTIONAL...\n", PORT_INET);
+    printf("[Server] Pornit pe portul %d. Suporta BAREME DINAMICE prin retea!\n", PORT_INET);
 
     pthread_t t_w, t_i, t_a, t_n; 
     pthread_create(&t_w, NULL, worker_thread_func, NULL);
