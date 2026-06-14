@@ -12,13 +12,13 @@ Elementul arhitectural central este abordarea de tip **Microserviciu Stateless (
 
 ## 1. Arhitectura Sistemului
 
-Sistemul renunță la procesele clasice (`fork`) în favoarea unei arhitecturi **Multithreaded**, utilizând multiplexare și un protocol binar personalizat (Custom Application Protocol). Serverul este complet independent (stateless) – nu stochează bareme local, ci primește dinamic condițiile de evaluare direct prin rețea de la clienți.
+Folosirea unei arhitecturi **Multithreaded**, utilizând multiplexare și un protocol binar personalizat (Custom Application Protocol). Serverul este complet independent (stateless) – nu stochează bareme local, ci primește dinamic condițiile de evaluare direct prin rețea de la clienți.
 
 ### Cele 4 Fire de Execuție (Threads) ale Serverului:
-* **📡 INET Thread (Rețea):** Folosește apelul de sistem `poll()` pentru a asigura I/O asincron, ascultând simultan până la 64 de clienți fără blocaje. Construiește job-urile și le adaugă în coada FIFO, protejând accesul cu un `pthread_mutex`.
-* **🧠 Worker Thread (Procesare Optică):** Consumatorul. Stă adormit (`0% CPU`) folosind variabile de condiție (`pthread_cond_wait`). Este trezit de INET Thread, preia imaginea și baremul, apelează biblioteca OpenCV pentru analiză, eliberează rapid Mutex-ul și comunică bidirecțional cu clientul.
-* **🛡️ Admin Thread (Securitate):** Ascultă pe un Socket UNIX local (`/tmp/omr_admin.sock`). Gestionează o conexiune 1:1 exclusivă prin mecanisme de Handshake (`OK`/`BUSY`) pentru comenzi de telemetrie și oprire de urgență.
-* **👀 INotify Thread (Monitorizare):** Interacționează direct cu nucleul Linux folosind API-ul `inotify` pentru a loga în consolă crearea și modificarea fișierelor temporare pe `/tmp`.
+* ** INET Thread (Rețea):** Folosește apelul de sistem `poll()` pentru a asigura I/O asincron, ascultând simultan până la 64 de clienți fără blocaje. Construiește job-urile și le adaugă în coada FIFO, protejând accesul cu un `pthread_mutex`.
+* ** Worker Thread (Procesare Optică):** Consumatorul. Stă adormit (`0% CPU`) folosind variabile de condiție (`pthread_cond_wait`). Este trezit de INET Thread, preia imaginea și baremul, apelează biblioteca OpenCV pentru analiză, eliberează rapid Mutex-ul și comunică bidirecțional cu clientul.
+* ** Admin Thread (Securitate):** Ascultă pe un Socket UNIX local (`/tmp/omr_admin.sock`). Gestionează o conexiune 1:1 exclusivă prin mecanisme de Handshake (`OK`/`BUSY`) pentru comenzi de telemetrie și oprire de urgență.
+* ** INotify Thread (Monitorizare):** Interacționează direct cu nucleul Linux folosind API-ul `inotify` pentru a loga în consolă crearea și modificarea fișierelor temporare pe `/tmp`.
 
 ---
 
@@ -67,22 +67,23 @@ Pentru mentenanță, sistemul include un client specializat (`admingrading.c`) c
 
 ## 5. Tehnologii și Biblioteci Utilizate
 
-* **Standardul C (POSIX 2008):** Sockets (`sys/socket.h`), I/O Asincron (`poll.h`), Concurrency (`pthread.h`), Linux Kernel API (`sys/inotify.h`).
-* **C++ & OpenCV 4.6:** `opencv_punte.cpp` acționează ca wrapper, expunând metode `extern "C"`. Utilizează funcții de computer vision: conversie Grayscale, Gaussian Blur, Adaptive Thresholding, `findContours` și algoritmi matematici pentru determinarea opțiunii bifate pe baza numărului de pixeli întunecați.
+* **Standardul C (POSIX 2008):** Baza întregii aplicații. Sockets (`sys/socket.h`), I/O Asincron (`poll.h`), Concurrency (`pthread.h`), și API-ul de Kernel Linux (`sys/inotify.h`).
+* **Wrapper Precompilat OpenCV (C/C++):** Interacțiunea cu motorul OpenCV 4.6 nu se face prin recompilarea surselor C++ la fiecare rulare, ci prin link-area unei biblioteci externe precompilate (`libocvCPPWrapper46`). Fișierul de legătură `omr_punte.c` expune metodele de evaluare (`incarca_imagine_opencv`, `proceseaza_intrebare_opencv`) direct în C folosind structuri opace (`struct Mat_t`). Acest design asigură o separare totală și curată între logica serverului (C pur) și procesarea optică (C++), care execută binarizarea (Adaptive Thresholding) și algoritmii de detecție a contururilor (`findContours`).
 
 ---
 
 ## 6. Compilare și Rulare
 
-Pentru a construi arhitectura hibridă C/C++, se utilizează flag-ul `-pthread` și biblioteca OpenCV 4.6.
+Compilarea se face exclusiv prin compilatorul de C (`gcc`), utilizând flag-ul `-pthread` pentru multithreading și link-ând direct biblioteca externă precompilată (`libocvCPPWrapper46`) pentru funcțiile OpenCV.
 
-### Compilarea Modulelor
+### Compilarea Executabilelor
 ```bash
-# 1. Compilarea Serverului (Creierul operațiunii) cu Puntea OpenCV
-gcc servergrading.c omr_punte.c -o server -pthread -I/home/luky931/ocvWrapper46/source -L/usr/lib -locvCPPWrapper46
+# 1. Compilarea Serverului (Creierul operațiunii) 
+# Se compilează fișierele C și se face linking cu librăria OpenCV Wrapper
+gcc servergrading.c omr_punte.c -o server -pthread -I~/ocvWrapper46/source -L/usr/lib -locvCPPWrapper46
 
-# 2. Compilarea Clientului (Utilizatorul)
+# 2. Compilarea Clientului (Interfața de evaluare)
 gcc clientgrading.c -o client
 
-# 3. Compilarea Aplicației de Management (Admin)
+# 3. Compilarea Aplicației de Management (Panoul Admin)
 gcc admingrading.c -o admin
