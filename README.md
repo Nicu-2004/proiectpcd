@@ -1,4 +1,4 @@
-#  Grading App — Documentație Arhitecturală
+#  Grading App 
 
 [![Language](https://img.shields.io/badge/Language-C%20%2F%20C%2B%2B-00599C?style=flat&logo=c%2B%2B)](https://en.wikipedia.org/wiki/C%2B%2B)
 [![Library](https://img.shields.io/badge/Library-OpenCV-5C3EE8?style=flat&logo=opencv)](https://opencv.org/)
