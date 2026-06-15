@@ -51,6 +51,7 @@ int incarca_barem_din_fisier(const char* cale_fisier, char* barem_out) {
 }
 
 int main(void) {
+    char ip_server[64];
     char cale_barem[DIM_BUFFER];
     char cale_fisier[DIM_BUFFER];
     char nume_iesire[DIM_BUFFER];
@@ -61,6 +62,15 @@ int main(void) {
     printf("      SISTEM OMR - CLIENT EVALUARE\n");
     printf("===========================================\n");
 
+    printf("Introdu IP-ul serverului (sau apasa Enter pentru 127.0.0.1): ");
+    fflush(stdout);
+    if (fgets(ip_server, sizeof(ip_server), stdin) != NULL) {
+        elimina_newline(ip_server);
+        if (strlen(ip_server) == 0) {
+            strcpy(ip_server, "127.0.0.1"); // Default fallback
+        }
+    }
+    
     while (1) {
         printf("\n--- MENIU PRINCIPAL ---\n");
         printf("1. Evalueaza poza (Trimitere test catre server)\n");
@@ -75,7 +85,7 @@ int main(void) {
             printf("[Client] Aplicatie anulata / oprita cu succes.\n");
             break;
         } else if (strcmp(optiune, "1") == 0) {
-            // 1. CERE BAREMUL
+            // CERE BAREMUL
             printf("\nIntrodu calea catre fisierul barem (ex: barem.txt): ");
             fflush(stdout);
             if (fgets(cale_barem, DIM_BUFFER, stdin) == NULL) break;
@@ -86,7 +96,7 @@ int main(void) {
                 continue;
             }
 
-            // 2. CERE POZA NECORECTATĂ
+            // CERE POZA NECORECTATĂ
             printf("Introdu calea imaginii OMR (ex: photo.png): ");
             fflush(stdout);
             if (fgets(cale_fisier, DIM_BUFFER, stdin) == NULL) break;
@@ -104,7 +114,7 @@ int main(void) {
                 close(file_fd); continue;
             }
 
-            // 3. CERE NUMELE REZULTATULUI
+            // CERE NUMELE REZULTATULUI
             printf("Introdu numele pentru poza corectata care se va salva (ex: rez_popescu.png): ");
             fflush(stdout);
             if (fgets(nume_iesire, DIM_BUFFER, stdin) == NULL) { close(file_fd); break; }
@@ -118,9 +128,10 @@ int main(void) {
             memset(&srv_addr, 0, sizeof(srv_addr));
             srv_addr.sin_family = AF_INET;
             srv_addr.sin_port   = htons(PORT_SERVER);
-            inet_pton(AF_INET, "127.0.0.1", &srv_addr.sin_addr);
+            
+            inet_pton(AF_INET, ip_server, &srv_addr.sin_addr);
 
-            printf("[Client] Ma conectez la serverul 127.0.0.1:%d...\n", PORT_SERVER);
+            printf("[Client] Ma conectez la serverul %s:%d...\n", ip_server, PORT_SERVER);
             if (connect(sock, (struct sockaddr*)&srv_addr, sizeof(srv_addr)) < 0) {
                 perror("[ERR] Conexiune esuata. Verifica daca serverul este pornit.");
                 close(sock); close(file_fd); continue;
