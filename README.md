@@ -1,9 +1,5 @@
 # Grading App - Motor OMR Asincron
 
-[![Language](https://img.shields.io/badge/Language-C%20%2F%20C%2B%2B-00599C?style=flat&logo=c%2B%2B)](https://en.wikipedia.org/wiki/C%2B%2B)
-[![Library](https://img.shields.io/badge/Library-OpenCV-5C3EE8?style=flat&logo=opencv)](https://opencv.org/)
-[![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?style=flat&logo=linux&logoColor=black)](https://www.linux.org/)
-
 **Grading App** este o aplicație distribuită de tip **Client-Server**, dezvoltată nativ în C (POSIX). Scopul principal al sistemului este automatizarea procesului de corectare a testelor grilă prin tehnologii de recunoaștere optică a marcajelor (**OMR - Optical Mark Recognition**).
 
 Elementul arhitectural central este abordarea de tip **Microserviciu Stateless (Agnostic)**. Aplicația folosește o arhitectură concurentă avansată (Multithreading + Asynchronous I/O) pentru a procesa evaluările rapid, gestionând eficient resursele procesorului și memoriei.
